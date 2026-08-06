@@ -4,7 +4,6 @@ import os
 
 from openai import OpenAI
 
-
 base_url = os.environ["DELTA_LLM_BASE_URL"].rstrip("/")
 api_key = os.environ["DELTA_LLM_API_KEY"]
 model = os.environ.get("DELTA_LLM_MODEL", "qwen3-8b")

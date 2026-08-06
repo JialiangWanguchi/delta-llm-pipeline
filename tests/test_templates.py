@@ -50,6 +50,6 @@ def test_generated_script_is_safe_and_valid(model: str, exposure: str) -> None:
     bash = shutil.which("bash")
     if bash:
         result = subprocess.run(
-            [bash, "-n"], input=script.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            [bash, "-n"], input=script.encode(), capture_output=True, check=False
         )
         assert result.returncode == 0, result.stderr.decode(errors="replace")

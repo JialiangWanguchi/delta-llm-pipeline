@@ -1,4 +1,9 @@
-from delta_llm.catalog import GPU_SPECS, MODEL_SPECS, estimate_weighted_gpu_hours, validate_selection
+from delta_llm.catalog import (
+    GPU_SPECS,
+    MODEL_SPECS,
+    estimate_weighted_gpu_hours,
+    validate_selection,
+)
 
 
 def test_deepseek_requires_two_a40_cards() -> None:

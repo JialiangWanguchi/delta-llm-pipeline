@@ -7,7 +7,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-
 RESULT_PREFIX = "DELTA_LLM_RESULT|"
 
 

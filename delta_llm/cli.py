@@ -32,7 +32,6 @@ from .templates import (
     render_stop_script,
 )
 
-
 EXPOSURE_MODES = ("none", "cloudflare-quick", "cloudflare-named")
 
 

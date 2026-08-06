@@ -8,7 +8,7 @@ from .catalog import GPUSpec, ModelSpec
 from .config import Config
 
 
-def q(value: str | int | float) -> str:
+def q(value: str | float) -> str:
     return shlex.quote(str(value))
 
 

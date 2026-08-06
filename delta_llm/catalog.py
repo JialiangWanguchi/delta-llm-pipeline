@@ -129,8 +129,10 @@ def validate_selection(
     if usable < model.required_vram_gb:
         return (
             False,
-            f"预计可用显存 {usable:.1f} GB，小于模型保守需求 "
-            f"{model.required_vram_gb:.1f} GB",
+            (
+                f"预计可用显存 {usable:.1f} GB，小于模型保守需求 "
+                f"{model.required_vram_gb:.1f} GB"
+            ),
         )
     return True, f"预计可用显存 {usable:.1f} GB，满足保守需求"
 
