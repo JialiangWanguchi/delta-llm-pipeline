@@ -68,6 +68,7 @@ ENV_DIR={q(env_dir)}
 HF_CACHE={q(hf_cache)}
 CLOUDFLARED={q(cloudflared)}
 DEPLOY_ID={q(params.deployment_id)}
+USER_ROOT={q(user_root)}
 DEPLOY_DIR={q(deploy_dir)}
 MODEL_ID={q(params.model.model_id)}
 SERVED_MODEL={q(params.model.key)}
@@ -91,12 +92,23 @@ sinfo -h -p "$GPU_PARTITION" -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' |
   sinfo -p "$GPU_PARTITION" >&2 || true
   exit 23
 }}
-mkdir -p "$DEPLOY_DIR" "$SHARED_ROOT/envs" "$HF_CACHE" "$SHARED_ROOT/bin"
+mkdir -p "$USER_ROOT/deployments" "$DEPLOY_DIR" "$SHARED_ROOT/envs" "$HF_CACHE" "$SHARED_ROOT/bin"
 chmod 700 "$DEPLOY_DIR"
 chmod 2770 "$SHARED_ROOT" "$SHARED_ROOT/envs" "$SHARED_ROOT/bin" || true
 
 mkdir -p "$DEPLOY_DIR/secrets" "$DEPLOY_DIR/logs"
 chmod 700 "$DEPLOY_DIR/secrets"
+
+# Revoke credentials left by earlier failed/stopped deployments owned by this user.
+for old_dir in "$USER_ROOT/deployments"/*; do
+  [[ -d "$old_dir" ]] || continue
+  old_state="$(cat "$old_dir/state" 2>/dev/null || true)"
+  if [[ "$old_state" == FAILED || "$old_state" == STOPPED ]]; then
+    rm -f "$old_dir/secrets/api_key" "$old_dir/secrets/cf_tunnel_token" \
+      "$old_dir/endpoint"
+  fi
+done
+
 printf '%s' "$API_KEY_B64" | base64 -d > "$DEPLOY_DIR/secrets/api_key"
 chmod 600 "$DEPLOY_DIR/secrets/api_key"
 if [[ -n "$HF_TOKEN_B64" ]]; then
@@ -108,10 +120,17 @@ if [[ -n "$CF_TOKEN_B64" ]]; then
   chmod 600 "$DEPLOY_DIR/secrets/cf_tunnel_token"
 fi
 
-if [[ ! -x "$ENV_DIR/bin/vllm" ]]; then
+env_ready() {{
+  [[ -f "$ENV_DIR/.delta-llm-ready" ]] || return 1
+  [[ -x "$ENV_DIR/bin/vllm" ]] || return 1
+  [[ "$(head -n 1 "$ENV_DIR/bin/vllm")" == "#!$ENV_DIR/bin/python" ]]
+}}
+
+if ! env_ready; then
   echo "[delta-llm] shared vLLM environment is missing; scheduling one-time setup"
   LOCK_DIR="$ENV_DIR.installing"
   if mkdir "$LOCK_DIR" 2>/dev/null; then
+    rm -rf "$ENV_DIR"
     cat > "$DEPLOY_DIR/setup.slurm" <<SETUP_SLURM
 #!/usr/bin/env bash
 #SBATCH --account={config.account}
@@ -126,22 +145,16 @@ if [[ ! -x "$ENV_DIR/bin/vllm" ]]; then
 #SBATCH --output=$DEPLOY_DIR/logs/setup_%j.out
 #SBATCH --error=$DEPLOY_DIR/logs/setup_%j.err
 set -euo pipefail
-trap 'rm -rf "$LOCK_DIR"' EXIT
+trap 'status=\$?; rm -rf "$LOCK_DIR"; if [[ \$status -ne 0 ]]; then rm -rf "$ENV_DIR"; fi' EXIT
 umask 007
 module purge
 module load miniforge3-python
-TMP_ENV="$ENV_DIR.tmp.\$SLURM_JOB_ID"
-rm -rf "\$TMP_ENV"
-python -m venv "\$TMP_ENV"
-"\$TMP_ENV/bin/python" -m pip install --upgrade pip
-"\$TMP_ENV/bin/python" -m pip install "$VLLM_WHEEL" \\
+python -m venv "$ENV_DIR"
+"$ENV_DIR/bin/python" -m pip install --upgrade pip
+"$ENV_DIR/bin/python" -m pip install "$VLLM_WHEEL" \\
   --extra-index-url https://download.pytorch.org/whl/{config.cuda_wheel}
-"\$TMP_ENV/bin/vllm" --version
-if [[ ! -e "$ENV_DIR" ]]; then
-  mv "\$TMP_ENV" "$ENV_DIR"
-else
-  rm -rf "\$TMP_ENV"
-fi
+"$ENV_DIR/bin/vllm" --version
+touch "$ENV_DIR/.delta-llm-ready"
 chmod -R g+rX "$ENV_DIR" || true
 SETUP_SLURM
     SETUP_JOB="$(sbatch --parsable "$DEPLOY_DIR/setup.slurm")"
@@ -150,7 +163,7 @@ SETUP_SLURM
       squeue -h -j "$SETUP_JOB" -o '[delta-llm] setup %T: %R'
       sleep 15
     done
-    if [[ ! -x "$ENV_DIR/bin/vllm" ]]; then
+    if ! env_ready; then
       echo "ERROR: vLLM setup failed" >&2
       cat "$DEPLOY_DIR/logs/setup_${{SETUP_JOB}}.out" 2>/dev/null || true
       cat "$DEPLOY_DIR/logs/setup_${{SETUP_JOB}}.err" 2>/dev/null || true
@@ -159,11 +172,11 @@ SETUP_SLURM
   else
     echo "[delta-llm] another user is installing the shared environment; waiting"
     for _ in $(seq 1 240); do
-      [[ -x "$ENV_DIR/bin/vllm" ]] && break
+      env_ready && break
       [[ ! -d "$LOCK_DIR" ]] && break
       sleep 15
     done
-    [[ -x "$ENV_DIR/bin/vllm" ]] || {{
+    env_ready || {{
       echo "ERROR: shared environment installation did not finish" >&2
       exit 22
     }}
