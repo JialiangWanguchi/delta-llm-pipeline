@@ -47,6 +47,11 @@ def render_deploy_script(config: Config, params: DeployParams) -> str:
     hf_cache = f"{config.shared_root}/cache/huggingface"
     cloudflared = f"{config.shared_root}/bin/cloudflared"
     wheel_url = config.vllm_wheel_url
+    env_fingerprint = (
+        f"vllm={config.vllm_version};"
+        f"transformers={config.transformers_version};"
+        f"cuda={config.cuda_wheel}"
+    )
     cpus = min(64, max(8, params.gpu_count * 16))
     host_mem = params.gpu.host_memory_gb_per_gpu * params.gpu_count
     slurm_time = hours_to_slurm(params.hours)
@@ -80,6 +85,8 @@ CF_TOKEN_B64={q(b64(params.cf_tunnel_token))}
 EXPOSURE={q(params.exposure)}
 NAMED_URL={q(named_url)}
 VLLM_WHEEL={q(wheel_url)}
+TRANSFORMERS_VERSION={q(config.transformers_version)}
+ENV_FINGERPRINT={q(env_fingerprint)}
 
 echo "[delta-llm] validating allocation and project storage"
 accounts | grep -F "$ACCOUNT" >/dev/null || {{
@@ -123,14 +130,14 @@ fi
 env_ready() {{
   [[ -f "$ENV_DIR/.delta-llm-ready" ]] || return 1
   [[ -x "$ENV_DIR/bin/vllm" ]] || return 1
-  [[ "$(head -n 1 "$ENV_DIR/bin/vllm")" == "#!$ENV_DIR/bin/python" ]]
+  [[ "$(head -n 1 "$ENV_DIR/bin/vllm")" == "#!$ENV_DIR/bin/python" ]] || return 1
+  [[ "$(< "$ENV_DIR/.delta-llm-ready")" == "$ENV_FINGERPRINT" ]]
 }}
 
 if ! env_ready; then
   echo "[delta-llm] shared vLLM environment is missing; scheduling one-time setup"
   LOCK_DIR="$ENV_DIR.installing"
   if mkdir "$LOCK_DIR" 2>/dev/null; then
-    rm -rf "$ENV_DIR"
     cat > "$DEPLOY_DIR/setup.slurm" <<SETUP_SLURM
 #!/usr/bin/env bash
 #SBATCH --account={config.account}
@@ -149,12 +156,18 @@ trap 'status=\$?; rm -rf "$LOCK_DIR"; if [[ \$status -ne 0 ]]; then rm -rf "$ENV
 umask 007
 module purge
 module load miniforge3-python
-python -m venv "$ENV_DIR"
+if [[ ! -x "$ENV_DIR/bin/vllm" ]] || \
+   [[ "\$(head -n 1 "$ENV_DIR/bin/vllm" 2>/dev/null || true)" != "#!$ENV_DIR/bin/python" ]]; then
+  rm -rf "$ENV_DIR"
+  python -m venv "$ENV_DIR"
+fi
 "$ENV_DIR/bin/python" -m pip install --upgrade pip
-"$ENV_DIR/bin/python" -m pip install "$VLLM_WHEEL" \\
+"$ENV_DIR/bin/python" -m pip install "$VLLM_WHEEL" \
+  "transformers==$TRANSFORMERS_VERSION" \\
   --extra-index-url https://download.pytorch.org/whl/{config.cuda_wheel}
 "$ENV_DIR/bin/vllm" --version
-touch "$ENV_DIR/.delta-llm-ready"
+"$ENV_DIR/bin/python" -c 'import transformers; assert transformers.__version__ == "$TRANSFORMERS_VERSION", transformers.__version__'
+printf '%s\n' "$ENV_FINGERPRINT" > "$ENV_DIR/.delta-llm-ready"
 chmod -R g+rX "$ENV_DIR" || true
 SETUP_SLURM
     SETUP_JOB="$(sbatch --parsable "$DEPLOY_DIR/setup.slurm")"

@@ -45,6 +45,9 @@ def test_generated_script_is_safe_and_valid(model: str, exposure: str) -> None:
     assert "named-secret" not in script
     assert "#SBATCH --account=bhsz-delta-gpu" in script
     assert "vllm-0.10.2-cp38-abi3-manylinux1_x86_64.whl" in script
+    assert 'TRANSFORMERS_VERSION=4.55.2' in script
+    assert '"transformers==$TRANSFORMERS_VERSION"' in script
+    assert "vllm=0.10.2;transformers=4.55.2;cuda=cu128" in script
     assert ".delta-llm-ready" in script
     assert "TMP_ENV" not in script
     assert "export VLLM_API_KEY=" in script

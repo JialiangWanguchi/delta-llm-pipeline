@@ -18,6 +18,7 @@ class Config:
     work_root: str = "/work/nvme/bhsz"
     default_hours: float = 47.5
     vllm_version: str = "0.10.2"
+    transformers_version: str = "4.55.2"
     cuda_wheel: str = "cu128"
     vllm_wheel_url: str = (
         "https://github.com/vllm-project/vllm/releases/download/v0.10.2/"
@@ -55,6 +56,9 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         work_root=str(delta.get("work_root", Config.work_root)).rstrip("/"),
         default_hours=float(delta.get("default_hours", Config.default_hours)),
         vllm_version=str(runtime.get("vllm_version", Config.vllm_version)),
+        transformers_version=str(
+            runtime.get("transformers_version", Config.transformers_version)
+        ),
         cuda_wheel=str(runtime.get("cuda_wheel", Config.cuda_wheel)),
         vllm_wheel_url=str(runtime.get("vllm_wheel_url", Config.vllm_wheel_url)),
         shared_root=str(runtime.get("shared_root", Config.shared_root)).rstrip("/"),
