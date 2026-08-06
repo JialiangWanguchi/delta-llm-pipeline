@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "delta-llm-pipeline"
+version = "0.1.0"
+description = "One-auth vLLM deployment pipeline for NCSA Delta"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Delta LLM Pipeline contributors"}]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+client = ["openai>=1.40"]
+
+[project.scripts]
+delta-llm = "delta_llm.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["delta_llm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

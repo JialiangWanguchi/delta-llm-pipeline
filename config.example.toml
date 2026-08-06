@@ -1,0 +1,22 @@
+[delta]
+login_host = "login.delta.ncsa.illinois.edu"
+account = "bhsz-delta-gpu"
+project_root = "/projects/bhsz"
+work_root = "/work/nvme/bhsz"
+default_hours = 47.5
+
+[runtime]
+# A fresh environment is intentional: vLLM wheels bundle a compatible PyTorch.
+vllm_version = "0.20.0"
+cuda_wheel = "cu128"
+shared_root = "/projects/bhsz/delta-llm/shared"
+gpu_memory_utilization = 0.90
+
+[exposure]
+# none | cloudflare-quick | cloudflare-named
+default_mode = "none"
+cloudflared_url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+
+# Only used by cloudflare-named. Put the tunnel token in the local environment
+# variable DELTA_LLM_CF_TUNNEL_TOKEN; never store it in this file.
+named_public_url = ""

@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Local configuration and credentials
+config.toml
+.env
+.delta-llm/
+*.pem
+*.key
