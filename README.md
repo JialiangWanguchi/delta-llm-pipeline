@@ -96,6 +96,8 @@ cp config.example.toml config.toml
 
 首次部署时，如果共享 vLLM 环境不存在，工具会额外提交一个 1 小时上限的 A40 安装作业。它通常只发生一次，但也需要排队并产生少量 GPU 计费。模型首次下载也会增加启动时间。
 
+默认固定使用经过 Delta CUDA 12.8 驱动验证的 vLLM 0.10.2 wheel。不要只修改 `vllm_version`：若要升级，还必须在 `config.toml` 同时填写确实存在且与 Delta 驱动兼容的 `vllm_wheel_url`。
+
 ### 推荐的非交互参数
 
 新版 4B 小模型、单张 A40、运行 47.5 小时，并创建临时公网 URL：

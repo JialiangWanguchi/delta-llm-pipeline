@@ -12,6 +12,7 @@ account = "example-gpu"
 default_hours = 12
 [runtime]
 gpu_memory_utilization = 0.85
+vllm_wheel_url = "https://example.invalid/vllm.whl"
 [exposure]
 default_mode = "cloudflare-quick"
 """,
@@ -21,4 +22,5 @@ default_mode = "cloudflare-quick"
     assert config.account == "example-gpu"
     assert config.default_hours == 12
     assert config.gpu_memory_utilization == 0.85
+    assert config.vllm_wheel_url == "https://example.invalid/vllm.whl"
     assert config.default_exposure == "cloudflare-quick"

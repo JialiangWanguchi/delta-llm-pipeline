@@ -46,11 +46,7 @@ def render_deploy_script(config: Config, params: DeployParams) -> str:
     )
     hf_cache = f"{config.shared_root}/cache/huggingface"
     cloudflared = f"{config.shared_root}/bin/cloudflared"
-    wheel_url = (
-        "https://github.com/vllm-project/vllm/releases/download/"
-        f"v{config.vllm_version}/vllm-{config.vllm_version}+{config.cuda_wheel}"
-        "-cp38-abi3-manylinux_2_28_x86_64.whl"
-    )
+    wheel_url = config.vllm_wheel_url
     cpus = min(64, max(8, params.gpu_count * 16))
     host_mem = params.gpu.host_memory_gb_per_gpu * params.gpu_count
     slurm_time = hours_to_slurm(params.hours)
