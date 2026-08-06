@@ -13,6 +13,12 @@ def test_deepseek_requires_two_a40_cards() -> None:
     assert validate_selection(model, gpu, 2)[0] is True
 
 
+def test_qwen3_4b_fits_one_a40_card() -> None:
+    assert validate_selection(
+        MODEL_SPECS["qwen3-4b-instruct"], GPU_SPECS["a40"], 1
+    )[0]
+
+
 def test_one_h200_fits_deepseek() -> None:
     assert validate_selection(
         MODEL_SPECS["deepseek-r1-32b"], GPU_SPECS["h200"], 1

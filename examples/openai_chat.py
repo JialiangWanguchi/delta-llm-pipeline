@@ -6,7 +6,7 @@ from openai import OpenAI
 
 base_url = os.environ["DELTA_LLM_BASE_URL"].rstrip("/")
 api_key = os.environ["DELTA_LLM_API_KEY"]
-model = os.environ.get("DELTA_LLM_MODEL", "qwen3-8b")
+model = os.environ.get("DELTA_LLM_MODEL", "qwen3-4b-instruct")
 
 client = OpenAI(base_url=base_url, api_key=api_key)
 response = client.chat.completions.create(

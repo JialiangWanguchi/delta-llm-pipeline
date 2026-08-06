@@ -135,7 +135,7 @@ def collect_deploy_params(
         model_key = prompt_choice(
             "Model",
             [(key, spec.label) for key, spec in MODEL_SPECS.items()],
-            "qwen3-8b",
+            "qwen3-4b-instruct",
         )
     model = MODEL_SPECS[model_key]
     default_gpu, default_count = recommended_gpu(model)

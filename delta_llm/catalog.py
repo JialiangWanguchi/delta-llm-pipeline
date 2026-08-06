@@ -68,6 +68,16 @@ GPU_SPECS: dict[str, GPUSpec] = {
 
 
 MODEL_SPECS: dict[str, ModelSpec] = {
+    "qwen3-4b-instruct": ModelSpec(
+        key="qwen3-4b-instruct",
+        label="Qwen3 4B Instruct 2507（新版小参数首选）",
+        model_id="Qwen/Qwen3-4B-Instruct-2507",
+        parameters="4.0B",
+        weight_format="BF16",
+        required_vram_gb=16,
+        default_max_model_len=32768,
+        notes="单张 A40/A100 即可；非思考 Instruct 版本。Apache-2.0。",
+    ),
     "qwen3-8b": ModelSpec(
         key="qwen3-8b",
         label="Qwen3 8B（入门/吞吐优先）",

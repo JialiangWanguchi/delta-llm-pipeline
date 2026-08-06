@@ -90,6 +90,11 @@ accounts | grep -F "$ACCOUNT" >/dev/null || {{
   accounts >&2
   exit 20
 }}
+sinfo -h -p "$GPU_PARTITION" -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' || {{
+  echo "ERROR: partition $GPU_PARTITION is unavailable or unknown" >&2
+  sinfo -p "$GPU_PARTITION" >&2 || true
+  exit 23
+}}
 mkdir -p "$DEPLOY_DIR" "$SHARED_ROOT/envs" "$HF_CACHE" "$SHARED_ROOT/bin"
 chmod 700 "$DEPLOY_DIR"
 chmod 2770 "$SHARED_ROOT" "$SHARED_ROOT/envs" "$SHARED_ROOT/bin" || true

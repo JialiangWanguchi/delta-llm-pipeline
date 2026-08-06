@@ -98,11 +98,11 @@ cp config.example.toml config.toml
 
 ### 推荐的非交互参数
 
-最便宜的 8B 模型、单张 A40、运行 47.5 小时，并创建临时公网 URL：
+新版 4B 小模型、单张 A40、运行 47.5 小时，并创建临时公网 URL：
 
 ```powershell
 .\run.ps1 --username your_ncsa_username deploy `
-  --model qwen3-8b --gpu a40 --gpus 1 --hours 47.5 `
+  --model qwen3-4b-instruct --gpu a40 --gpus 1 --hours 47.5 `
   --exposure cloudflare-quick --acknowledge-external-tunnel
 ```
 
@@ -129,6 +129,7 @@ macOS/Linux 把 `run.ps1` 换成 `./run.sh`，并使用 `\` 续行。
 
 | 选项 | 权重格式 | 默认上下文 | 建议起点 | 适用场景 |
 |---|---:|---:|---:|---|
+| `qwen3-4b-instruct` | BF16 | 32K | 1× A40 | 新版小参数、低成本接口实验 |
 | `qwen3-8b` | BF16 | 32K | 1× A40 | 吞吐、功能测试、低成本实验 |
 | `qwen2.5-14b` | BF16 | 8K | 1× A40 | 效果与成本平衡 |
 | `qwen3-32b-awq` | AWQ 4-bit | 16K | 1× A40 | 单卡运行更大的模型 |
@@ -174,10 +175,10 @@ curl：
 curl "$DELTA_LLM_BASE_URL/chat/completions" \
   -H "Authorization: Bearer $DELTA_LLM_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen3-8b","messages":[{"role":"user","content":"Hello"}],"stream":false}'
+  -d '{"model":"qwen3-4b-instruct","messages":[{"role":"user","content":"Hello"}],"stream":false}'
 ```
 
-模型名称使用本工具的短名称，例如 `qwen3-8b`。Quick Tunnel 下必须使用非流式请求。
+模型名称使用本工具的短名称，例如 `qwen3-4b-instruct`。Quick Tunnel 下必须使用非流式请求。
 
 ## 管理部署
 
