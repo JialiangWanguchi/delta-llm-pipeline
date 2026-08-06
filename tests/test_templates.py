@@ -50,6 +50,17 @@ def test_generated_script_is_safe_and_valid(model: str, exposure: str) -> None:
     assert "export VLLM_API_KEY=" in script
     assert "\r" not in script
 
+    # Quoted heredocs preserve backslashes verbatim. Every shell continuation in
+    # the generated service script must therefore contain exactly one of them.
+    service_body = script.split("<<'SERVICE_BODY'", 1)[1].split("SERVICE_BODY", 1)[0]
+    continuation_lines = [
+        line
+        for line in service_body.splitlines()
+        if line.rstrip().endswith("\\")
+    ]
+    assert continuation_lines
+    assert all(not line.rstrip().endswith("\\\\") for line in continuation_lines)
+
     bash = shutil.which("bash")
     if bash:
         result = subprocess.run(

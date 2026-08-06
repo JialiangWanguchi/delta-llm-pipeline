@@ -252,14 +252,14 @@ cleanup() {{
 }}
 trap cleanup EXIT INT TERM
 
-"$ENV_DIR/bin/vllm" serve "$MODEL_ID" \\
-  --host {listen_host} \\
-  --port 8000 \\
-  --served-model-name "$SERVED_MODEL" \\
-  --tensor-parallel-size {params.gpu_count} \\
-  --max-model-len {params.max_model_len} \\
-  --gpu-memory-utilization {config.gpu_memory_utilization:.3f} \\
-  --generation-config vllm{extra_args} \\
+"$ENV_DIR/bin/vllm" serve "$MODEL_ID" \
+  --host {listen_host} \
+  --port 8000 \
+  --served-model-name "$SERVED_MODEL" \
+  --tensor-parallel-size {params.gpu_count} \
+  --max-model-len {params.max_model_len} \
+  --gpu-memory-utilization {config.gpu_memory_utilization:.3f} \
+  --generation-config vllm{extra_args} \
   > "$DEPLOY_DIR/logs/vllm.log" 2>&1 &
 VLLM_PID=$!
 
@@ -285,12 +285,12 @@ case "$EXPOSURE" in
     ENDPOINT="http://$(hostname -f):8000/v1"
     ;;
   cloudflare-quick)
-    "$CLOUDFLARED" tunnel --url http://127.0.0.1:8000 --no-autoupdate \\
+    "$CLOUDFLARED" tunnel --url http://127.0.0.1:8000 --no-autoupdate \
       > "$DEPLOY_DIR/logs/cloudflared.log" 2>&1 &
     TUNNEL_PID=$!
     ENDPOINT=""
     for _ in $(seq 1 60); do
-      ENDPOINT="$(grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' \\
+      ENDPOINT="$(grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' \
         "$DEPLOY_DIR/logs/cloudflared.log" | head -n 1 || true)"
       [[ -n "$ENDPOINT" ]] && break
       kill -0 "$TUNNEL_PID" 2>/dev/null || break
@@ -305,7 +305,7 @@ case "$EXPOSURE" in
     ;;
   cloudflare-named)
     CF_TOKEN="$(< "$DEPLOY_DIR/secrets/cf_tunnel_token")"
-    "$CLOUDFLARED" tunnel --no-autoupdate run --token "$CF_TOKEN" \\
+    "$CLOUDFLARED" tunnel --no-autoupdate run --token "$CF_TOKEN" \
       > "$DEPLOY_DIR/logs/cloudflared.log" 2>&1 &
     TUNNEL_PID=$!
     sleep 5
