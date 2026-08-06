@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -74,7 +75,9 @@ class SSHRunner:
                 bufsize=1,
             )
         except FileNotFoundError as exc:
-            raise RuntimeError("OpenSSH client not found. Install/enable the 'ssh' command.") from exc
+            raise RuntimeError(
+                "OpenSSH client not found. Install/enable the 'ssh' command."
+            ) from exc
 
         assert process.stdin is not None
         assert process.stdout is not None
@@ -130,6 +133,22 @@ def save_local_state(deployment_id: str, payload: str) -> Path:
     except OSError:
         pass
     return path
+
+
+def mark_local_state_stopped(deployment_id: str) -> Path | None:
+    """Revoke credentials cached in a local deployment record after remote stop."""
+    deployment_id = validate_deployment_id(deployment_id)
+    path = local_state_root() / f"{deployment_id}.json"
+    if not path.exists():
+        return None
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state["state"] = "STOPPED"
+    state["endpoint"] = ""
+    state["api_key"] = ""
+    return save_local_state(
+        deployment_id,
+        json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+    )
 
 
 def ensure_interactive_terminal() -> None:

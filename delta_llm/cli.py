@@ -18,6 +18,7 @@ from .config import Config, load_config
 from .remote import (
     SSHRunner,
     ensure_interactive_terminal,
+    mark_local_state_stopped,
     save_local_state,
     validate_deployment_id,
     validate_username,
@@ -127,9 +128,7 @@ def print_catalog(config: Config) -> None:
         )
 
 
-def collect_deploy_params(
-    args: argparse.Namespace, config: Config, username: str
-) -> DeployParams:
+def collect_deploy_params(args: argparse.Namespace, config: Config, username: str) -> DeployParams:
     model_key = args.model
     if not model_key:
         model_key = prompt_choice(
@@ -241,9 +240,7 @@ def run_deploy(args: argparse.Namespace, config: Config) -> int:
 
     ensure_interactive_terminal()
     print("\nYou will enter the NCSA Kerberos password and approve Duo once.")
-    result = SSHRunner(username, config.login_host).run_script(
-        render_deploy_script(config, params)
-    )
+    result = SSHRunner(username, config.login_host).run_script(render_deploy_script(config, params))
     if result is None:
         raise RuntimeError("Remote deployment returned no structured result")
 
@@ -300,7 +297,12 @@ def run_remote_command(args: argparse.Namespace, config: Config) -> int:
             if answer.lower() not in {"y", "yes"}:
                 print("Cancelled locally; no remote change was made.")
                 return 0
-        runner.run_script(render_stop_script(config, username, deployment_id))
+        result = runner.run_script(render_stop_script(config, username, deployment_id))
+        if result is None or result.state != "STOPPED":
+            raise RuntimeError("Remote stop returned no STOPPED confirmation")
+        local_path = mark_local_state_stopped(deployment_id)
+        if local_path:
+            print(f"Updated local state and removed cached API key: {local_path}")
     return 0
 
 
