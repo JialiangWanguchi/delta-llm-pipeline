@@ -14,6 +14,7 @@ default_hours = 12
 torch_version = "2.5.0"
 transformers_version = "4.48.0"
 bagel_commit = "abc123"
+runtime_root = "/work/nvme/example/runtime"
 [exposure]
 default_mode = "cloudflare-quick"
 """,
@@ -25,4 +26,5 @@ default_mode = "cloudflare-quick"
     assert config.torch_version == "2.5.0"
     assert config.transformers_version == "4.48.0"
     assert config.bagel_commit == "abc123"
+    assert config.runtime_root == "/work/nvme/example/runtime"
     assert config.default_exposure == "cloudflare-quick"

@@ -16,6 +16,8 @@ cuda_wheel = "cu124"
 bagel_commit = "a2fa77dd8caeefc41e6607ae0ec17408d3f4ee9f"
 thinkmorph_commit = "c1a48adfa212259c8ad79dfd9d05d87c27340cef"
 shared_root = "/projects/bhsz/delta-llm/shared"
+# Environments and package caches contain many small files and belong on NVMe.
+runtime_root = "/work/nvme/bhsz/delta-llm/shared"
 
 [exposure]
 # none | cloudflare-quick | cloudflare-named

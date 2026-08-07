@@ -20,7 +20,7 @@ FastAPI Gateway :8000
 - ThinkMorph：2张A40
 - 默认时长：47.5小时；Delta上限48小时
 - 计费估算：3 × 0.5 × 47.5 = 71.25 weighted GPU-hours
-- 权重：约59.2GB；共享环境、源码和权重缓存在 `/projects/bhsz/delta-llm/shared`
+- 权重：约59.2GB，源码和权重位于 `/projects/bhsz/delta-llm/shared`；Python环境和包缓存在 `/work/nvme/bhsz/delta-llm/shared`
 
 第四张A40可用 `--gpus 4` 预留，但当前初版仍只将前三张分配给两个模型。
 

@@ -37,6 +37,7 @@ class DeployParams:
     hf_token: str
     cf_tunnel_token: str
     detach: bool
+    recover_stalled_setup: bool
 
 
 def render_deploy_script(config: Config, params: DeployParams) -> str:
@@ -45,7 +46,7 @@ def render_deploy_script(config: Config, params: DeployParams) -> str:
     env_name = (
         f"multimodal-py{config.python_version}-torch{config.torch_version}-{config.cuda_wheel}"
     )
-    env_dir = f"{config.shared_root}/envs/{env_name}"
+    env_dir = f"{config.runtime_root}/envs/{env_name}"
     source_root = f"{config.shared_root}/sources"
     bagel_repo = f"{source_root}/bagel"
     thinkmorph_repo = f"{source_root}/thinkmorph"
@@ -53,6 +54,8 @@ def render_deploy_script(config: Config, params: DeployParams) -> str:
     bagel_model = f"{model_root}/BAGEL-7B-MoT"
     thinkmorph_model = f"{model_root}/ThinkMorph-7B"
     cloudflared = f"{config.shared_root}/bin/cloudflared"
+    offload_root = f"{config.work_root}/{params.username}/delta-llm/offload/{params.deployment_id}"
+    legacy_env_dir = f"{config.shared_root}/envs/{env_name}"
     slurm_time = hours_to_slurm(params.hours)
     named_url = config.named_public_url if params.exposure == "cloudflare-named" else ""
     env_fingerprint = ";".join(
@@ -76,6 +79,7 @@ umask 007
 ACCOUNT={q(config.account)}
 PROJECT_ROOT={q(config.project_root)}
 SHARED_ROOT={q(config.shared_root)}
+RUNTIME_ROOT={q(config.runtime_root)}
 ENV_DIR={q(env_dir)}
 SOURCE_ROOT={q(source_root)}
 BAGEL_REPO={q(bagel_repo)}
@@ -84,6 +88,8 @@ MODEL_ROOT={q(model_root)}
 BAGEL_MODEL={q(bagel_model)}
 THINKMORPH_MODEL={q(thinkmorph_model)}
 CLOUDFLARED={q(cloudflared)}
+OFFLOAD_ROOT={q(offload_root)}
+LEGACY_ENV_DIR={q(legacy_env_dir)}
 DEPLOY_ID={q(params.deployment_id)}
 USER_ROOT={q(user_root)}
 DEPLOY_DIR={q(deploy_dir)}
@@ -96,6 +102,7 @@ CF_TOKEN_B64={q(b64(params.cf_tunnel_token))}
 ENV_FINGERPRINT={q(env_fingerprint)}
 BAGEL_COMMIT={q(config.bagel_commit)}
 THINKMORPH_COMMIT={q(config.thinkmorph_commit)}
+RECOVER_STALLED_SETUP={str(params.recover_stalled_setup).lower()}
 
 echo "[delta-multimodal] validating allocation, partition, and storage"
 accounts | grep -F "$ACCOUNT" >/dev/null || {{
@@ -107,11 +114,31 @@ sinfo -h -p gpuA40x4 -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' || {{
   exit 23
 }}
 mkdir -p "$USER_ROOT/deployments" "$DEPLOY_DIR/logs" "$DEPLOY_DIR/secrets" \
-  "$DEPLOY_DIR/runtime" "$SHARED_ROOT/envs" "$SOURCE_ROOT" "$MODEL_ROOT" \
-  "$SHARED_ROOT/bin"
+  "$DEPLOY_DIR/runtime" "$RUNTIME_ROOT/envs" "$RUNTIME_ROOT/conda-pkgs" \
+  "$RUNTIME_ROOT/pip-cache" "$SOURCE_ROOT" "$MODEL_ROOT" "$SHARED_ROOT/bin" \
+  "$OFFLOAD_ROOT"
 chmod 700 "$DEPLOY_DIR" "$DEPLOY_DIR/secrets"
-chmod 2770 "$SHARED_ROOT" "$SHARED_ROOT/envs" "$SOURCE_ROOT" "$MODEL_ROOT" \
-  "$SHARED_ROOT/bin" || true
+chmod 2770 "$SHARED_ROOT" "$RUNTIME_ROOT" "$RUNTIME_ROOT/envs" \
+  "$RUNTIME_ROOT/conda-pkgs" "$RUNTIME_ROOT/pip-cache" "$SOURCE_ROOT" \
+  "$MODEL_ROOT" "$SHARED_ROOT/bin" || true
+
+if [[ "$RECOVER_STALLED_SETUP" == true ]]; then
+  echo "[delta-multimodal] cancelling this user's stalled setup jobs"
+  mapfile -t STALLED_JOBS < <(squeue -h -u "$USER" -n delta-mm-setup -o '%A' | sort -u)
+  if (( ${{#STALLED_JOBS[@]}} )); then
+    scancel "${{STALLED_JOBS[@]}}"
+    for _ in $(seq 1 30); do
+      squeue -h -j "$(IFS=,; echo "${{STALLED_JOBS[*]}}")" | grep -q . || break
+      sleep 2
+    done
+    squeue -h -j "$(IFS=,; echo "${{STALLED_JOBS[*]}}")" | grep -q . && {{
+      echo "ERROR: stalled setup jobs did not stop" >&2
+      exit 25
+    }}
+  fi
+  [[ "$LEGACY_ENV_DIR" == /projects/bhsz/delta-llm/shared/envs/* ]] || exit 26
+  rm -rf "$LEGACY_ENV_DIR.installing" "$LEGACY_ENV_DIR"
+fi
 
 for old_dir in "$USER_ROOT/deployments"/*; do
   [[ -d "$old_dir" ]] || continue
@@ -169,6 +196,8 @@ umask 007
 module purge
 module load miniforge3-python
 module load cuda 2>/dev/null || true
+export CONDA_PKGS_DIRS="$RUNTIME_ROOT/conda-pkgs"
+export PIP_CACHE_DIR="$RUNTIME_ROOT/pip-cache"
 
 sync_repo() {{
   local url="\$1" commit="\$2" target="\$3"
@@ -186,7 +215,8 @@ sync_repo https://github.com/ThinkMorph/ThinkMorph.git "$THINKMORPH_COMMIT" "$TH
 
 if [[ ! -x "$ENV_DIR/bin/python" ]]; then
   rm -rf "$ENV_DIR"
-  conda create -y -p "$ENV_DIR" python={config.python_version}
+  conda create -y --solver libmamba -p "$ENV_DIR" \\
+    python={config.python_version} pip
 fi
 "$ENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel ninja packaging
 "$ENV_DIR/bin/python" -m pip install \\
@@ -295,6 +325,7 @@ THINKMORPH_REPO={q(thinkmorph_repo)}
 BAGEL_MODEL={q(bagel_model)}
 THINKMORPH_MODEL={q(thinkmorph_model)}
 CLOUDFLARED={q(cloudflared)}
+OFFLOAD_ROOT={q(offload_root)}
 EXPOSURE={q(params.exposure)}
 NAMED_URL={q(named_url)}
 source "$DEPLOY_DIR/metadata.env"
@@ -325,7 +356,7 @@ THINKMORPH_CUDA="${{CUDA_IDS[1]}},${{CUDA_IDS[2]}}"
 CUDA_VISIBLE_DEVICES="$BAGEL_CUDA" "$ENV_DIR/bin/python" \
   "$DEPLOY_DIR/runtime/worker.py" --model bagel-7b \
   --repo-dir "$BAGEL_REPO" --checkpoint-dir "$BAGEL_MODEL" \
-  --offload-dir "$DEPLOY_DIR/offload/bagel" --port 8101 \
+  --offload-dir "$OFFLOAD_ROOT/bagel" --port 8101 \
   > "$DEPLOY_DIR/logs/bagel.log" 2>&1 &
 BAGEL_PID=$!
 PIDS+=("$BAGEL_PID")
@@ -333,7 +364,7 @@ PIDS+=("$BAGEL_PID")
 CUDA_VISIBLE_DEVICES="$THINKMORPH_CUDA" "$ENV_DIR/bin/python" \
   "$DEPLOY_DIR/runtime/worker.py" --model thinkmorph-7b \
   --repo-dir "$THINKMORPH_REPO" --checkpoint-dir "$THINKMORPH_MODEL" \
-  --offload-dir "$DEPLOY_DIR/offload/thinkmorph" --port 8102 \
+  --offload-dir "$OFFLOAD_ROOT/thinkmorph" --port 8102 \
   > "$DEPLOY_DIR/logs/thinkmorph.log" 2>&1 &
 THINKMORPH_PID=$!
 PIDS+=("$THINKMORPH_PID")
@@ -542,6 +573,7 @@ def render_setup_status_script(config: Config, username: str) -> str:
 set -u
 ROOT={q(user_root)}
 SHARED={q(config.shared_root)}
+RUNTIME={q(config.runtime_root)}
 echo '=== TIME / HOST ==='
 date -Is
 hostname -f
@@ -551,11 +583,14 @@ echo '=== SETUP ACCOUNTING (TODAY) ==='
 sacct -S "$(date +%F)" -u "$USER" --name delta-mm-setup -X -n -P \
   -o JobID,JobName,State,Elapsed,Timelimit,ExitCode,NodeList 2>/dev/null || true
 echo '=== SHARED LOCK / READY ==='
-ls -ld "$SHARED"/envs/*.installing 2>/dev/null || echo 'no installing lock'
-find "$SHARED/envs" -maxdepth 2 -name '.delta-multimodal-ready' -type f \
+ls -ld "$SHARED"/envs/*.installing "$RUNTIME"/envs/*.installing 2>/dev/null || \
+  echo 'no installing lock'
+find "$SHARED/envs" "$RUNTIME/envs" -maxdepth 2 \
+  -name '.delta-multimodal-ready' -type f \
   -print -exec cat {{}} \; 2>/dev/null || true
 echo '=== SHARED USAGE ==='
-du -sh "$SHARED/envs" "$SHARED/models" "$SHARED/sources" 2>/dev/null || true
+du -sh "$SHARED/envs" "$RUNTIME/envs" "$SHARED/models" "$SHARED/sources" \
+  2>/dev/null || true
 echo '=== CHECKPOINTS ==='
 find "$SHARED/models" -maxdepth 2 -type f \
   \( -name 'ema.safetensors' -o -name 'model.safetensors' -o -name 'ae.safetensors' \) \

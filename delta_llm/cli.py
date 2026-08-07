@@ -49,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--exposure", choices=EXPOSURE_MODES)
     deploy.add_argument("--acknowledge-external-tunnel", action="store_true")
     deploy.add_argument("--detach", action="store_true", help="Return after sbatch submission")
+    deploy.add_argument(
+        "--recover-stalled-setup",
+        action="store_true",
+        help="Cancel this user's delta-mm-setup jobs and replace the incomplete legacy env",
+    )
     deploy.add_argument("--dry-run", action="store_true", help="Validate without SSH or Slurm")
 
     sub.add_parser("list", help="List your deployments on Delta")
@@ -118,6 +123,7 @@ def collect_deploy_params(args: argparse.Namespace, config: Config, username: st
         hf_token=os.environ.get("HF_TOKEN", ""),
         cf_tunnel_token=cf_token,
         detach=bool(args.detach),
+        recover_stalled_setup=bool(args.recover_stalled_setup),
     )
 
 

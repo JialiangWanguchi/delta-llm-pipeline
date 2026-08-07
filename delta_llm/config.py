@@ -26,6 +26,7 @@ class Config:
     bagel_commit: str = "a2fa77dd8caeefc41e6607ae0ec17408d3f4ee9f"
     thinkmorph_commit: str = "c1a48adfa212259c8ad79dfd9d05d87c27340cef"
     shared_root: str = "/projects/bhsz/delta-llm/shared"
+    runtime_root: str = "/work/nvme/bhsz/delta-llm/shared"
     default_exposure: str = "none"
     cloudflared_url: str = (
         "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
@@ -63,6 +64,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         bagel_commit=str(runtime.get("bagel_commit", Config.bagel_commit)),
         thinkmorph_commit=str(runtime.get("thinkmorph_commit", Config.thinkmorph_commit)),
         shared_root=str(runtime.get("shared_root", Config.shared_root)).rstrip("/"),
+        runtime_root=str(runtime.get("runtime_root", Config.runtime_root)).rstrip("/"),
         default_exposure=str(exposure.get("default_mode", Config.default_exposure)),
         cloudflared_url=str(exposure.get("cloudflared_url", Config.cloudflared_url)),
         named_public_url=str(exposure.get("named_public_url", "")).rstrip("/"),

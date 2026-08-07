@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+from dataclasses import replace
 
 import pytest
 
@@ -23,6 +24,7 @@ def make_params(exposure: str = "none") -> DeployParams:
         hf_token="hf-secret-must-not-appear",
         cf_tunnel_token="named-secret" if exposure == "cloudflare-named" else "",
         detach=False,
+        recover_stalled_setup=False,
     )
 
 
@@ -51,6 +53,8 @@ def test_generated_dual_model_script_is_safe_and_valid(exposure: str) -> None:
     assert "runtime/gateway.py" in script
     assert ".delta-multimodal-ready" in script
     assert "#SBATCH --time=04:00:00" in script
+    assert "/work/nvme/bhsz/delta-llm/shared/envs/" in script
+    assert "--solver libmamba" in script
     assert 'printf \'%s\\n\' "$SETUP_JOB" > "$LOCK_DIR/job_id"' in script
     assert "seq 1 2160" in script
     assert "\r" not in script
@@ -81,6 +85,14 @@ def test_runtime_sources_are_embedded() -> None:
     script = render_deploy_script(Config(), make_params())
     assert "printf '%s'" in script
     assert 'base64 -d > "$DEPLOY_DIR/runtime/worker.py"' in script
+
+
+def test_recovery_is_explicit_and_scoped() -> None:
+    params = replace(make_params(), recover_stalled_setup=True)
+    script = render_deploy_script(Config(), params)
+    assert "RECOVER_STALLED_SETUP=true" in script
+    assert 'squeue -h -u "$USER" -n delta-mm-setup' in script
+    assert 'rm -rf "$LEGACY_ENV_DIR.installing" "$LEGACY_ENV_DIR"' in script
 
 
 def test_setup_status_script_is_read_only_and_valid() -> None:
