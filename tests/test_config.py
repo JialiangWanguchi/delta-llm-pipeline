@@ -11,8 +11,9 @@ def test_load_config(tmp_path: Path) -> None:
 account = "example-gpu"
 default_hours = 12
 [runtime]
-gpu_memory_utilization = 0.85
-vllm_wheel_url = "https://example.invalid/vllm.whl"
+torch_version = "2.5.0"
+transformers_version = "4.48.0"
+bagel_commit = "abc123"
 [exposure]
 default_mode = "cloudflare-quick"
 """,
@@ -21,6 +22,7 @@ default_mode = "cloudflare-quick"
     config = load_config(path)
     assert config.account == "example-gpu"
     assert config.default_hours == 12
-    assert config.gpu_memory_utilization == 0.85
-    assert config.vllm_wheel_url == "https://example.invalid/vllm.whl"
+    assert config.torch_version == "2.5.0"
+    assert config.transformers_version == "4.48.0"
+    assert config.bagel_commit == "abc123"
     assert config.default_exposure == "cloudflare-quick"

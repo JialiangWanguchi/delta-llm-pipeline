@@ -17,19 +17,18 @@ class Config:
     project_root: str = "/projects/bhsz"
     work_root: str = "/work/nvme/bhsz"
     default_hours: float = 47.5
-    vllm_version: str = "0.10.2"
-    transformers_version: str = "4.55.2"
-    cuda_wheel: str = "cu128"
-    vllm_wheel_url: str = (
-        "https://github.com/vllm-project/vllm/releases/download/v0.10.2/"
-        "vllm-0.10.2-cp38-abi3-manylinux1_x86_64.whl"
-    )
+    python_version: str = "3.10"
+    torch_version: str = "2.5.1"
+    torchvision_version: str = "0.20.1"
+    transformers_version: str = "4.49.0"
+    flash_attn_version: str = "2.5.8"
+    cuda_wheel: str = "cu124"
+    bagel_commit: str = "a2fa77dd8caeefc41e6607ae0ec17408d3f4ee9f"
+    thinkmorph_commit: str = "c1a48adfa212259c8ad79dfd9d05d87c27340cef"
     shared_root: str = "/projects/bhsz/delta-llm/shared"
-    gpu_memory_utilization: float = 0.90
     default_exposure: str = "none"
     cloudflared_url: str = (
-        "https://github.com/cloudflare/cloudflared/releases/latest/download/"
-        "cloudflared-linux-amd64"
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
     )
     named_public_url: str = ""
 
@@ -55,16 +54,15 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         project_root=str(delta.get("project_root", Config.project_root)).rstrip("/"),
         work_root=str(delta.get("work_root", Config.work_root)).rstrip("/"),
         default_hours=float(delta.get("default_hours", Config.default_hours)),
-        vllm_version=str(runtime.get("vllm_version", Config.vllm_version)),
-        transformers_version=str(
-            runtime.get("transformers_version", Config.transformers_version)
-        ),
+        python_version=str(runtime.get("python_version", Config.python_version)),
+        torch_version=str(runtime.get("torch_version", Config.torch_version)),
+        torchvision_version=str(runtime.get("torchvision_version", Config.torchvision_version)),
+        transformers_version=str(runtime.get("transformers_version", Config.transformers_version)),
+        flash_attn_version=str(runtime.get("flash_attn_version", Config.flash_attn_version)),
         cuda_wheel=str(runtime.get("cuda_wheel", Config.cuda_wheel)),
-        vllm_wheel_url=str(runtime.get("vllm_wheel_url", Config.vllm_wheel_url)),
+        bagel_commit=str(runtime.get("bagel_commit", Config.bagel_commit)),
+        thinkmorph_commit=str(runtime.get("thinkmorph_commit", Config.thinkmorph_commit)),
         shared_root=str(runtime.get("shared_root", Config.shared_root)).rstrip("/"),
-        gpu_memory_utilization=float(
-            runtime.get("gpu_memory_utilization", Config.gpu_memory_utilization)
-        ),
         default_exposure=str(exposure.get("default_mode", Config.default_exposure)),
         cloudflared_url=str(exposure.get("cloudflared_url", Config.cloudflared_url)),
         named_public_url=str(exposure.get("named_public_url", "")).rstrip("/"),

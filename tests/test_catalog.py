@@ -1,33 +1,18 @@
-from delta_llm.catalog import (
-    GPU_SPECS,
-    MODEL_SPECS,
-    estimate_weighted_gpu_hours,
-    validate_selection,
-)
+from delta_llm.catalog import MODEL_SPECS, estimate_weighted_gpu_hours, validate_gpu_count
 
 
-def test_deepseek_requires_two_a40_cards() -> None:
-    model = MODEL_SPECS["deepseek-r1-32b"]
-    gpu = GPU_SPECS["a40"]
-    assert validate_selection(model, gpu, 1)[0] is False
-    assert validate_selection(model, gpu, 2)[0] is True
+def test_pipeline_contains_only_requested_models() -> None:
+    assert set(MODEL_SPECS) == {"bagel-7b", "thinkmorph-7b"}
+    assert MODEL_SPECS["bagel-7b"].assigned_gpus == 1
+    assert MODEL_SPECS["thinkmorph-7b"].assigned_gpus == 2
 
 
-def test_qwen3_4b_fits_one_a40_card() -> None:
-    assert validate_selection(
-        MODEL_SPECS["qwen3-4b-instruct"], GPU_SPECS["a40"], 1
-    )[0]
-
-
-def test_one_h200_fits_deepseek() -> None:
-    assert validate_selection(
-        MODEL_SPECS["deepseek-r1-32b"], GPU_SPECS["h200"], 1
-    )[0]
+def test_dual_model_gpu_layout() -> None:
+    assert validate_gpu_count(2)[0] is False
+    assert validate_gpu_count(3)[0] is True
+    assert validate_gpu_count(4)[0] is True
+    assert validate_gpu_count(5)[0] is False
 
 
 def test_a40_weighted_cost() -> None:
-    assert estimate_weighted_gpu_hours(GPU_SPECS["a40"], 1, 47.5) == 23.75
-
-
-def test_reject_too_many_cards() -> None:
-    assert validate_selection(MODEL_SPECS["qwen3-8b"], GPU_SPECS["a40"], 5)[0] is False
+    assert estimate_weighted_gpu_hours(3, 47.5) == 71.25

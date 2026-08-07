@@ -6,19 +6,21 @@ work_root = "/work/nvme/bhsz"
 default_hours = 47.5
 
 [runtime]
-# A fresh environment is intentional: vLLM wheels bundle a compatible PyTorch.
-vllm_version = "0.10.2"
-transformers_version = "4.55.2"
-cuda_wheel = "cu128"
-vllm_wheel_url = "https://github.com/vllm-project/vllm/releases/download/v0.10.2/vllm-0.10.2-cp38-abi3-manylinux1_x86_64.whl"
+# These versions and source revisions are tested as one unit. Upgrade together.
+python_version = "3.10"
+torch_version = "2.5.1"
+torchvision_version = "0.20.1"
+transformers_version = "4.49.0"
+flash_attn_version = "2.5.8"
+cuda_wheel = "cu124"
+bagel_commit = "a2fa77dd8caeefc41e6607ae0ec17408d3f4ee9f"
+thinkmorph_commit = "c1a48adfa212259c8ad79dfd9d05d87c27340cef"
 shared_root = "/projects/bhsz/delta-llm/shared"
-gpu_memory_utilization = 0.90
 
 [exposure]
 # none | cloudflare-quick | cloudflare-named
 default_mode = "none"
 cloudflared_url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
 
-# Only used by cloudflare-named. Put the tunnel token in the local environment
-# variable DELTA_LLM_CF_TUNNEL_TOKEN; never store it in this file.
+# Only used by cloudflare-named. Keep the token in DELTA_LLM_CF_TUNNEL_TOKEN.
 named_public_url = ""

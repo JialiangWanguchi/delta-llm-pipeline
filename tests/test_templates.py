@@ -3,23 +3,19 @@ import subprocess
 
 import pytest
 
-from delta_llm.catalog import GPU_SPECS, MODEL_SPECS
 from delta_llm.config import Config
 from delta_llm.templates import DeployParams, hours_to_slurm, render_deploy_script
 
 
-def make_params(model: str = "qwen3-8b", exposure: str = "none") -> DeployParams:
+def make_params(exposure: str = "none") -> DeployParams:
     return DeployParams(
         username="testuser",
-        deployment_id=f"{model}-20260806-120000-abcd",
+        deployment_id="bagel-thinkmorph-20260807-120000-abcd",
         api_key="plain-secret-must-not-appear",
-        model=MODEL_SPECS[model],
-        gpu=GPU_SPECS["a40"],
-        gpu_count=2 if model == "deepseek-r1-32b" else 1,
+        gpu_count=3,
         hours=1,
-        max_model_len=4096,
         exposure=exposure,
-        hf_token="",
+        hf_token="hf-secret-must-not-appear",
         cf_tunnel_token="named-secret" if exposure == "cloudflare-named" else "",
         detach=False,
     )
@@ -30,36 +26,38 @@ def test_hours_to_slurm() -> None:
     assert hours_to_slurm(0.001) == "00:01:00"
 
 
-@pytest.mark.parametrize(
-    ("model", "exposure"),
-    [
-        ("qwen3-8b", "none"),
-        ("qwen3-32b-awq", "cloudflare-quick"),
-        ("deepseek-r1-32b", "cloudflare-named"),
-    ],
-)
-def test_generated_script_is_safe_and_valid(model: str, exposure: str) -> None:
-    config = Config(named_public_url="https://llm.example.org")
-    script = render_deploy_script(config, make_params(model, exposure))
+@pytest.mark.parametrize("exposure", ["none", "cloudflare-quick", "cloudflare-named"])
+def test_generated_dual_model_script_is_safe_and_valid(exposure: str) -> None:
+    config = Config(named_public_url="https://models.example.org")
+    script = render_deploy_script(config, make_params(exposure))
     assert "plain-secret-must-not-appear" not in script
+    assert "hf-secret-must-not-appear" not in script
     assert "named-secret" not in script
-    assert "#SBATCH --account=bhsz-delta-gpu" in script
-    assert "vllm-0.10.2-cp38-abi3-manylinux1_x86_64.whl" in script
-    assert 'TRANSFORMERS_VERSION=4.55.2' in script
-    assert '"transformers==$TRANSFORMERS_VERSION"' in script
-    assert "vllm=0.10.2;transformers=4.55.2;cuda=cu128" in script
-    assert ".delta-llm-ready" in script
-    assert "TMP_ENV" not in script
-    assert "export VLLM_API_KEY=" in script
+    assert "#SBATCH --partition=gpuA40x4" in script
+    assert "#SBATCH --gpus-per-node=3" in script
+    assert "--model bagel-7b" in script
+    assert "--model thinkmorph-7b" in script
+    assert 'BAGEL_CUDA="${CUDA_IDS[0]}"' in script
+    assert 'THINKMORPH_CUDA="${CUDA_IDS[1]},${CUDA_IDS[2]}"' in script
+    assert "ByteDance-Seed/BAGEL-7B-MoT" in script
+    assert "ThinkMorph/ThinkMorph-7B" in script
+    assert "DELTA_MULTIMODAL_API_KEY" in script
+    assert "runtime/worker.py" in script
+    assert "runtime/gateway.py" in script
+    assert ".delta-multimodal-ready" in script
+    assert "#SBATCH --time=04:00:00" in script
     assert "\r" not in script
 
-    # Quoted heredocs preserve backslashes verbatim. Every shell continuation in
-    # the generated service script must therefore contain exactly one of them.
+    setup_body = script.split("<<SETUP_SLURM", 1)[1].split("SETUP_SLURM", 1)[0]
+    setup_continuation_lines = [
+        line for line in setup_body.splitlines() if line.rstrip().endswith("\\")
+    ]
+    assert setup_continuation_lines
+    assert all(line.rstrip().endswith("\\\\") for line in setup_continuation_lines)
+
     service_body = script.split("<<'SERVICE_BODY'", 1)[1].split("SERVICE_BODY", 1)[0]
     continuation_lines = [
-        line
-        for line in service_body.splitlines()
-        if line.rstrip().endswith("\\")
+        line for line in service_body.splitlines() if line.rstrip().endswith("\\")
     ]
     assert continuation_lines
     assert all(not line.rstrip().endswith("\\\\") for line in continuation_lines)
@@ -70,3 +68,9 @@ def test_generated_script_is_safe_and_valid(model: str, exposure: str) -> None:
             [bash, "-n"], input=script.encode(), capture_output=True, check=False
         )
         assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+
+def test_runtime_sources_are_embedded() -> None:
+    script = render_deploy_script(Config(), make_params())
+    assert "printf '%s'" in script
+    assert 'base64 -d > "$DEPLOY_DIR/runtime/worker.py"' in script

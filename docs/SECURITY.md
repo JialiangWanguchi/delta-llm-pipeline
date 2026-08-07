@@ -7,7 +7,7 @@
 ## 凭据处理
 
 - NCSA 密码与 Duo 响应只由 OpenSSH 客户端读取，Python 程序无法获得它们。
-- API key 用 Python `secrets` 生成，通过 SSH stdin 发送；远端保存在部署目录下的 `secrets/api_key`，权限 `0600`。
+- 共享 API key 用 Python `secrets` 生成，通过 SSH stdin 发送；远端保存在部署目录下的 `secrets/api_key`，权限 `0600`。两个内部模型 Worker 不监听公网，只有统一 Gateway 验证该 key。
 - Hugging Face token 仅在需要 gated model 时从本地 `HF_TOKEN` 读取。本版本内置模型通常不需要它。
 - Named Tunnel token 从 `DELTA_LLM_CF_TUNNEL_TOKEN` 读取。不要写入 `config.toml`、README、Git history 或 Slurm 参数。
 - 本地状态位于 `~/.delta-llm/deployments`，包含 API key。共享电脑上应确认主目录权限，并在实验完成后删除不再需要的状态文件。
@@ -24,10 +24,10 @@
 
 ## 已知边界
 
-- vLLM 的 API key 是共享 bearer token，不提供按成员身份、配额或细粒度权限。
-- Quick Tunnel 无 SLA、不支持 SSE，并非生产级入口。
+- Gateway 的 API key 是共享 bearer token，不提供按成员身份、配额或细粒度权限。
+- Quick Tunnel 无 SLA，并非生产级入口。
 - 公开端点可能受到扫描和拒绝服务攻击。API key 能防止未授权推理请求，但不能替代 WAF、速率限制、审计和网络访问控制。
 - 同一项目组成员可读取组共享的软件环境和模型缓存，但个人部署目录使用 `umask 077`/`0600` 保护 secret。
-- `stop` 会删除远端 key，但本地状态副本仍由用户管理。
+- `stop` 会删除远端 key、接口地址，并清空当前电脑状态文件中的缓存 key。
 
 正式团队服务建议由 NCSA Gateway 或团队控制的反向代理承载，增加访问控制、速率限制、日志政策和密钥轮换。
