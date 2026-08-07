@@ -90,11 +90,24 @@ class SSHRunner:
         process.stdin.close()
 
         parsed: RemoteResult | None = None
-        for raw_line in process.stdout:
-            line = raw_line.decode("utf-8", errors="replace")
-            print(line, end="", flush=True)
-            if line.startswith(RESULT_PREFIX):
-                parsed = parse_result_line(line.rstrip("\r\n"))
+        output_log = os.environ.get("DELTA_LLM_OUTPUT_LOG")
+        log_handle = None
+        if output_log:
+            log_path = Path(output_log).expanduser()
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_handle = log_path.open("a", encoding="utf-8")
+        try:
+            for raw_line in process.stdout:
+                line = raw_line.decode("utf-8", errors="replace")
+                print(line, end="", flush=True)
+                if log_handle:
+                    log_handle.write(line)
+                    log_handle.flush()
+                if line.startswith(RESULT_PREFIX):
+                    parsed = parse_result_line(line.rstrip("\r\n"))
+        finally:
+            if log_handle:
+                log_handle.close()
 
         return_code = process.wait()
         if return_code != 0:
