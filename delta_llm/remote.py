@@ -62,7 +62,11 @@ class SSHRunner:
             "-o",
             "ServerAliveInterval=30",
             "-o",
-            "ServerAliveCountMax=6",
+            "ServerAliveCountMax=20",
+            "-o",
+            "TCPKeepAlive=yes",
+            "-o",
+            "IPQoS=none",
             self.destination,
             "bash -s",
         ]
@@ -71,7 +75,7 @@ class SSHRunner:
                 command,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=None,
+                stderr=subprocess.STDOUT,
                 bufsize=1,
             )
         except FileNotFoundError as exc:
