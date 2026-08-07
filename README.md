@@ -104,6 +104,9 @@ for model in ("bagel-7b", "thinkmorph-7b"):
 # 检查账户、A40分区、存储、网络和CUDA module
 .\run.ps1 --username your_ncsa_username doctor
 
+# 查看首次共享安装作业、模型文件大小和最近安装日志（只读）
+.\run.ps1 --username your_ncsa_username setup-status
+
 # 查看部署列表、状态和日志（这些远程命令需要NCSA认证）
 .\run.ps1 --username your_ncsa_username list
 .\run.ps1 --username your_ncsa_username status DEPLOYMENT_ID

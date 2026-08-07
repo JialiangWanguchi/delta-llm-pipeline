@@ -23,6 +23,7 @@ from .templates import (
     render_doctor_script,
     render_list_script,
     render_logs_script,
+    render_setup_status_script,
     render_status_script,
     render_stop_script,
 )
@@ -40,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("models", help="Show the two bundled models and API capabilities")
     sub.add_parser("doctor", help="Check Delta account, A40 queue, storage, and network")
+    sub.add_parser("setup-status", help="Read shared installer job, files, and recent setup logs")
 
     deploy = sub.add_parser("deploy", help="Deploy both models through one SSH+Duo login")
     deploy.add_argument("--gpus", type=int, choices=(3, 4), default=3)
@@ -182,6 +184,8 @@ def run_remote_command(args: argparse.Namespace, config: Config) -> int:
     runner = SSHRunner(username, config.login_host)
     if args.command == "doctor":
         runner.run_script(render_doctor_script(config))
+    elif args.command == "setup-status":
+        runner.run_script(render_setup_status_script(config, username))
     elif args.command == "list":
         runner.run_script(render_list_script(config, username))
     elif args.command == "status":

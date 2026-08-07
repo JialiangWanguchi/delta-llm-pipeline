@@ -4,7 +4,12 @@ import subprocess
 import pytest
 
 from delta_llm.config import Config
-from delta_llm.templates import DeployParams, hours_to_slurm, render_deploy_script
+from delta_llm.templates import (
+    DeployParams,
+    hours_to_slurm,
+    render_deploy_script,
+    render_setup_status_script,
+)
 
 
 def make_params(exposure: str = "none") -> DeployParams:
@@ -76,3 +81,18 @@ def test_runtime_sources_are_embedded() -> None:
     script = render_deploy_script(Config(), make_params())
     assert "printf '%s'" in script
     assert 'base64 -d > "$DEPLOY_DIR/runtime/worker.py"' in script
+
+
+def test_setup_status_script_is_read_only_and_valid() -> None:
+    script = render_setup_status_script(Config(), "testuser")
+    assert "/projects/bhsz/testuser/delta-llm" in script
+    assert "squeue" in script
+    assert "sacct" in script
+    assert "CHECKPOINTS" in script
+    assert "rm " not in script
+    bash = shutil.which("bash")
+    if bash:
+        result = subprocess.run(
+            [bash, "-n"], input=script.encode(), capture_output=True, check=False
+        )
+        assert result.returncode == 0, result.stderr.decode(errors="replace")

@@ -534,3 +534,40 @@ curl -fsSI --max-time 15 https://huggingface.co | head -n 1
 echo '=== CUDA MODULES ==='
 module -t avail cuda 2>&1 | tail -n 20 || true
 """
+
+
+def render_setup_status_script(config: Config, username: str) -> str:
+    user_root = f"{config.project_root}/{username}/delta-llm"
+    return rf"""#!/usr/bin/env bash
+set -u
+ROOT={q(user_root)}
+SHARED={q(config.shared_root)}
+echo '=== TIME / HOST ==='
+date -Is
+hostname -f
+echo '=== ACTIVE JOBS ==='
+squeue -u "$USER" -o '%i|%j|%T|%M|%l|%R' || true
+echo '=== SETUP ACCOUNTING (TODAY) ==='
+sacct -S "$(date +%F)" -u "$USER" --name delta-mm-setup -X -n -P \
+  -o JobID,JobName,State,Elapsed,Timelimit,ExitCode,NodeList 2>/dev/null || true
+echo '=== SHARED LOCK / READY ==='
+ls -ld "$SHARED"/envs/*.installing 2>/dev/null || echo 'no installing lock'
+find "$SHARED/envs" -maxdepth 2 -name '.delta-multimodal-ready' -type f \
+  -print -exec cat {{}} \; 2>/dev/null || true
+echo '=== SHARED USAGE ==='
+du -sh "$SHARED/envs" "$SHARED/models" "$SHARED/sources" 2>/dev/null || true
+echo '=== CHECKPOINTS ==='
+find "$SHARED/models" -maxdepth 2 -type f \
+  \( -name 'ema.safetensors' -o -name 'model.safetensors' -o -name 'ae.safetensors' \) \
+  -printf '%TY-%Tm-%Td %TH:%TM | %s bytes | %p\n' 2>/dev/null | sort
+echo '=== NEWEST SETUP LOGS ==='
+find "$ROOT/deployments" -type f \
+  \( -name 'setup_*.err' -o -name 'setup_*.out' \) \
+  -printf '%T@|%p\n' 2>/dev/null | sort -nr | head -n 4 | cut -d'|' -f2- |
+while IFS= read -r file; do
+  [[ -n "$file" ]] || continue
+  echo "--- $file"
+  tail -n 80 "$file"
+done
+echo '=== END ==='
+"""
