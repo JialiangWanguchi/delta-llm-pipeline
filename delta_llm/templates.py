@@ -215,6 +215,8 @@ chmod -R g+rX "$ENV_DIR" "$BAGEL_REPO" "$THINKMORPH_REPO" \\
   "$BAGEL_MODEL" "$THINKMORPH_MODEL" || true
 SETUP_SLURM
     SETUP_JOB="$(sbatch --parsable "$DEPLOY_DIR/setup.slurm")"
+    printf '%s\n' "$SETUP_JOB" > "$LOCK_DIR/job_id"
+    printf '%s\n' "$DEPLOY_DIR" > "$LOCK_DIR/deploy_dir"
     echo "[delta-multimodal] setup job $SETUP_JOB submitted"
     while squeue -h -j "$SETUP_JOB" | grep -q .; do
       squeue -h -j "$SETUP_JOB" -o '[delta-multimodal] setup %T: %R'
@@ -228,9 +230,20 @@ SETUP_SLURM
     fi
   else
     echo "[delta-multimodal] another member is installing shared assets; waiting"
-    for _ in $(seq 1 360); do
+    # Covers queue time plus the setup job's four-hour wall time. The SSH
+    # keepalive in the local client keeps this one authenticated session alive.
+    for attempt in $(seq 1 2160); do
       env_ready && break
       [[ ! -d "$LOCK_DIR" ]] && break
+      if [[ -s "$LOCK_DIR/job_id" ]]; then
+        ACTIVE_SETUP="$(< "$LOCK_DIR/job_id")"
+        if (( attempt % 3 == 0 )); then
+          squeue -h -j "$ACTIVE_SETUP" \
+            -o '[delta-multimodal] shared setup %T: %R' | head -n 1 || true
+        fi
+      elif (( attempt % 15 == 0 )); then
+        echo "[delta-multimodal] waiting for legacy shared setup lock"
+      fi
       sleep 20
     done
     env_ready || {{ echo "ERROR: shared setup did not finish" >&2; exit 22; }}

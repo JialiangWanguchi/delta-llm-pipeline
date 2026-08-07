@@ -46,6 +46,8 @@ def test_generated_dual_model_script_is_safe_and_valid(exposure: str) -> None:
     assert "runtime/gateway.py" in script
     assert ".delta-multimodal-ready" in script
     assert "#SBATCH --time=04:00:00" in script
+    assert 'printf \'%s\\n\' "$SETUP_JOB" > "$LOCK_DIR/job_id"' in script
+    assert "seq 1 2160" in script
     assert "\r" not in script
 
     setup_body = script.split("<<SETUP_SLURM", 1)[1].split("SETUP_SLURM", 1)[0]
