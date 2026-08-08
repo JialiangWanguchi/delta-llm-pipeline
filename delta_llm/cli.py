@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--username", help="NCSA username (or NCSA_USERNAME env var)")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("models", help="Show the two bundled models and API capabilities")
-    sub.add_parser("doctor", help="Check Delta account, A40 queue, storage, and network")
+    sub.add_parser("doctor", help="Check Delta account, A100 queue, storage, and network")
     sub.add_parser("setup-status", help="Read shared installer job, files, and recent setup logs")
 
     deploy = sub.add_parser("deploy", help="Deploy both models through one SSH+Duo login")
@@ -92,7 +92,7 @@ def print_catalog() -> None:
         print(f"{model.key}: {model.label}")
         print(f"  Hugging Face: {model.model_id}")
         print(f"  Checkpoint: ~{model.checkpoint_gb:g} GB")
-        print(f"  Assigned A40 GPUs: {model.assigned_gpus}")
+        print(f"  Assigned A100 GPUs: {model.assigned_gpus}")
         print(f"  Capabilities: {', '.join(model.capabilities)}\n")
     print("Default layout: BAGEL GPU 0; ThinkMorph GPU 1; one gateway/key.")
 
@@ -140,8 +140,8 @@ def print_plan(params: DeployParams) -> None:
     print("\nDual-model deployment plan")
     print(f"  ID:          {params.deployment_id}")
     print("  Models:      bagel-7b, thinkmorph-7b")
-    print("  Partition:   gpuA40x4")
-    print(f"  GPUs:        {params.gpu_count} x NVIDIA A40 48 GB")
+    print("  Partition:   gpuA100x4")
+    print(f"  GPUs:        {params.gpu_count} x NVIDIA A100 40 GB")
     print(f"  Layout:      {layout}")
     print(f"  Duration:    {params.hours:g} hours")
     print(f"  Exposure:    {params.exposure}")
@@ -169,7 +169,7 @@ def run_deploy(args: argparse.Namespace, config: Config) -> int:
         "endpoint": result.endpoint,
         "expires_at": result.expires_at,
         "models": list(MODEL_SPECS),
-        "gpu": "a40",
+        "gpu": "a100",
         "gpu_count": params.gpu_count,
         "gpu_layout": {
             "bagel-7b": [0],

@@ -52,20 +52,20 @@ MODEL_SPECS: dict[str, ModelSpec] = {
 
 
 GPU_SPECS: dict[str, GPUSpec] = {
-    "a40": GPUSpec(
-        key="a40",
-        label="NVIDIA A40 48 GB",
-        partition="gpuA40x4",
-        vram_gb=48,
+    "a100": GPUSpec(
+        key="a100",
+        label="NVIDIA A100 40 GB",
+        partition="gpuA100x4",
+        vram_gb=40,
         max_gpus=4,
-        charge_factor=0.5,
+        charge_factor=1.0,
     )
 }
 
 
 def validate_gpu_count(gpu_count: int) -> tuple[bool, str]:
     if gpu_count not in {2, 3, 4}:
-        return False, "双模型服务需要 2–4 张 A40"
+        return False, "双模型服务需要 2–4 张 A100"
     thinkmorph_gpus = 1 if gpu_count == 2 else 2
     layout = f"BAGEL 1 张 + ThinkMorph {thinkmorph_gpus} 张"
     if gpu_count == 4:
@@ -74,4 +74,4 @@ def validate_gpu_count(gpu_count: int) -> tuple[bool, str]:
 
 
 def estimate_weighted_gpu_hours(gpu_count: int, hours: float) -> float:
-    return gpu_count * hours * GPU_SPECS["a40"].charge_factor
+    return gpu_count * hours * GPU_SPECS["a100"].charge_factor

@@ -41,7 +41,7 @@ def test_generated_dual_model_script_is_safe_and_valid(exposure: str) -> None:
     assert "plain-secret-must-not-appear" not in script
     assert "hf-secret-must-not-appear" not in script
     assert "named-secret" not in script
-    assert "#SBATCH --partition=gpuA40x4" in script
+    assert "#SBATCH --partition=gpuA100x4" in script
     assert "#SBATCH --gpus-per-node=2" in script
     assert "#SBATCH --cpus-per-task=32" in script
     assert "#SBATCH --mem=120g" in script
@@ -50,6 +50,7 @@ def test_generated_dual_model_script_is_safe_and_valid(exposure: str) -> None:
     assert 'BAGEL_CUDA="${CUDA_IDS[0]}"' in script
     assert 'THINKMORPH_CUDA="${CUDA_IDS[1]},${CUDA_IDS[2]}"' in script
     assert 'THINKMORPH_CUDA="${CUDA_IDS[1]}"' in script
+    assert script.count("--max-memory-gib 36") == 2
     assert "ByteDance-Seed/BAGEL-7B-MoT" in script
     assert "ThinkMorph/ThinkMorph-7B" in script
     assert "DELTA_MULTIMODAL_API_KEY" in script

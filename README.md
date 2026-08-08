@@ -14,15 +14,15 @@ FastAPI Gateway :8000
 ## 默认资源
 
 - Slurm 账户：`bhsz-delta-gpu`
-- 分区：`gpuA40x4`
-- 默认申请：2× NVIDIA A40 48GB
-- BAGEL：1张A40
-- ThinkMorph：1张A40
+- 分区：`gpuA100x4`
+- 默认申请：2× NVIDIA A100 40GB
+- BAGEL：1张A100
+- ThinkMorph：1张A100
 - 默认时长：47.5小时；Delta上限48小时
-- 计费估算：2 × 0.5 × 47.5 = 47.5 weighted GPU-hours
+- 计费估算：2 × 1.0 × 47.5 = 95 weighted GPU-hours
 - 权重：约59.2GB，源码和权重位于 `/projects/bhsz/delta-llm/shared`；Python环境和包缓存在 `/work/nvme/bhsz/delta-llm/shared`
 
-两个约29.6GB的模型各自可装入一张48GB A40。`--gpus 3` 会让 ThinkMorph 使用两张卡以增加显存余量；`--gpus 4` 再预留一张卡。卡数越多通常越难排到，本项目默认使用2卡布局。
+两个约29.6GB的模型各自部署到一张40GB A100，并把每个进程的模型映射上限设为36GiB以保留运行余量。`--gpus 3` 会让 ThinkMorph 使用两张卡；`--gpus 4` 再预留一张卡。卡数越多通常越难排到，本项目默认使用2卡布局。
 
 ## 快速开始
 
@@ -57,7 +57,7 @@ OpenSSH 会提示一次NCSA密码和Duo。首次部署还会：
 1. 创建固定版本的Python/PyTorch/FlashAttention环境；
 2. 下载两个官方源码仓库；
 3. 下载约59GB模型权重；
-4. 提交一个2×A40 Slurm作业；
+4. 提交一个2×A100 Slurm作业；
 5. 等待两个Worker和Gateway全部健康；
 6. 返回一个Base URL、一个API key和本地状态文件。
 
@@ -111,7 +111,7 @@ for model in ("bagel-7b", "thinkmorph-7b"):
 # 仅检查方案，不登录、不提交作业
 .\run.ps1 --username your_ncsa_username deploy --gpus 2 --hours 1 --dry-run
 
-# 检查账户、A40分区、存储、网络和CUDA module
+# 检查账户、A100分区、存储、网络和CUDA module
 .\run.ps1 --username your_ncsa_username doctor
 
 # 查看首次共享安装作业、模型文件大小和最近安装日志（只读）

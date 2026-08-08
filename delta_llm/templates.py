@@ -114,8 +114,8 @@ accounts | grep -F "$ACCOUNT" >/dev/null || {{
   echo "ERROR: account $ACCOUNT is not available to $USER" >&2
   exit 20
 }}
-sinfo -h -p gpuA40x4 -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' || {{
-  echo "ERROR: gpuA40x4 is unavailable" >&2
+sinfo -h -p gpuA100x4 -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' || {{
+  echo "ERROR: gpuA100x4 is unavailable" >&2
   exit 23
 }}
 mkdir -p "$USER_ROOT/deployments" "$DEPLOY_DIR/logs" "$DEPLOY_DIR/secrets" \
@@ -200,7 +200,7 @@ if ! env_ready; then
     cat > "$DEPLOY_DIR/setup.slurm" <<SETUP_SLURM
 #!/usr/bin/env bash
 #SBATCH --account={config.account}
-#SBATCH --partition=gpuA40x4
+#SBATCH --partition=gpuA100x4
 #SBATCH --job-name=delta-mm-setup
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -310,7 +310,7 @@ fi
 cat > "$DEPLOY_DIR/metadata.env" <<METADATA
 DEPLOYMENT_ID=$DEPLOY_ID
 MODELS=bagel-7b,thinkmorph-7b
-GPU_PARTITION=gpuA40x4
+GPU_PARTITION=gpuA100x4
 GPU_COUNT=$GPU_COUNT
 GPU_LAYOUT=bagel-7b:1,thinkmorph-7b:{thinkmorph_gpu_count}
 EXPOSURE=$EXPOSURE
@@ -322,7 +322,7 @@ cat > "$DEPLOY_DIR/service.slurm" <<'SERVICE_HEADER'
 SERVICE_HEADER
 cat >> "$DEPLOY_DIR/service.slurm" <<SERVICE_CONFIG
 #SBATCH --account={config.account}
-#SBATCH --partition=gpuA40x4
+#SBATCH --partition=gpuA100x4
 #SBATCH --job-name=mm-{params.deployment_id[:20]}
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -380,7 +380,7 @@ fi
 CUDA_VISIBLE_DEVICES="$BAGEL_CUDA" "$ENV_DIR/bin/python" \
   "$DEPLOY_DIR/runtime/worker.py" --model bagel-7b \
   --repo-dir "$BAGEL_REPO" --checkpoint-dir "$BAGEL_MODEL" \
-  --offload-dir "$OFFLOAD_ROOT/bagel" --port 8101 \
+  --offload-dir "$OFFLOAD_ROOT/bagel" --max-memory-gib 36 --port 8101 \
   > "$DEPLOY_DIR/logs/bagel.log" 2>&1 &
 BAGEL_PID=$!
 PIDS+=("$BAGEL_PID")
@@ -388,7 +388,7 @@ PIDS+=("$BAGEL_PID")
 CUDA_VISIBLE_DEVICES="$THINKMORPH_CUDA" "$ENV_DIR/bin/python" \
   "$DEPLOY_DIR/runtime/worker.py" --model thinkmorph-7b \
   --repo-dir "$THINKMORPH_REPO" --checkpoint-dir "$THINKMORPH_MODEL" \
-  --offload-dir "$OFFLOAD_ROOT/thinkmorph" --port 8102 \
+  --offload-dir "$OFFLOAD_ROOT/thinkmorph" --max-memory-gib 36 --port 8102 \
   > "$DEPLOY_DIR/logs/thinkmorph.log" 2>&1 &
 THINKMORPH_PID=$!
 PIDS+=("$THINKMORPH_PID")
@@ -580,8 +580,8 @@ def render_doctor_script(config: Config) -> str:
 set -euo pipefail
 echo '=== ACCOUNT ==='
 accounts
-echo '=== A40 PARTITION ==='
-sinfo -p gpuA40x4 -o '%P %a %l %D %t %G'
+echo '=== A100 PARTITION ==='
+sinfo -p gpuA100x4 -o '%P %a %l %D %t %G'
 echo '=== STORAGE ==='
 quota 2>/dev/null || true
 echo '=== OUTBOUND ==='

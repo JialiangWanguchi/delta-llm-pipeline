@@ -15,5 +15,5 @@ def test_dual_model_gpu_layout() -> None:
     assert validate_gpu_count(5)[0] is False
 
 
-def test_a40_weighted_cost() -> None:
-    assert estimate_weighted_gpu_hours(2, 47.5) == 47.5
+def test_a100_weighted_cost() -> None:
+    assert estimate_weighted_gpu_hours(2, 47.5) == 95.0
