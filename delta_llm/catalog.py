@@ -40,7 +40,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         model_id="ThinkMorph/ThinkMorph-7B",
         repository="https://github.com/ThinkMorph/ThinkMorph.git",
         checkpoint_gb=29.6,
-        assigned_gpus=2,
+        assigned_gpus=1,
         capabilities=(
             "text-to-image",
             "image-edit",
@@ -64,9 +64,10 @@ GPU_SPECS: dict[str, GPUSpec] = {
 
 
 def validate_gpu_count(gpu_count: int) -> tuple[bool, str]:
-    if gpu_count not in {3, 4}:
-        return False, "双模型服务需要 3 张 A40；可使用第 4 张卡增加余量"
-    layout = "BAGEL 1 张 + ThinkMorph 2 张"
+    if gpu_count not in {2, 3, 4}:
+        return False, "双模型服务需要 2–4 张 A40"
+    thinkmorph_gpus = 1 if gpu_count == 2 else 2
+    layout = f"BAGEL 1 张 + ThinkMorph {thinkmorph_gpus} 张"
     if gpu_count == 4:
         layout += " + 1 张预留卡"
     return True, layout

@@ -45,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("setup-status", help="Read shared installer job, files, and recent setup logs")
 
     deploy = sub.add_parser("deploy", help="Deploy both models through one SSH+Duo login")
-    deploy.add_argument("--gpus", type=int, choices=(3, 4), default=3)
+    deploy.add_argument("--gpus", type=int, choices=(2, 3, 4), default=2)
     deploy.add_argument("--hours", type=float, help="Wall time; maximum 48")
     deploy.add_argument("--exposure", choices=EXPOSURE_MODES)
     deploy.add_argument("--acknowledge-external-tunnel", action="store_true")
@@ -94,7 +94,7 @@ def print_catalog() -> None:
         print(f"  Checkpoint: ~{model.checkpoint_gb:g} GB")
         print(f"  Assigned A40 GPUs: {model.assigned_gpus}")
         print(f"  Capabilities: {', '.join(model.capabilities)}\n")
-    print("Default layout: BAGEL GPU 0; ThinkMorph GPUs 1-2; one gateway/key.")
+    print("Default layout: BAGEL GPU 0; ThinkMorph GPU 1; one gateway/key.")
 
 
 def collect_deploy_params(args: argparse.Namespace, config: Config, username: str) -> DeployParams:
@@ -171,7 +171,10 @@ def run_deploy(args: argparse.Namespace, config: Config) -> int:
         "models": list(MODEL_SPECS),
         "gpu": "a40",
         "gpu_count": params.gpu_count,
-        "gpu_layout": {"bagel-7b": [0], "thinkmorph-7b": [1, 2]},
+        "gpu_layout": {
+            "bagel-7b": [0],
+            "thinkmorph-7b": [1] if params.gpu_count == 2 else [1, 2],
+        },
         "api_key": params.api_key,
         "remote_dir": result.remote_dir,
     }

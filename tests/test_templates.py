@@ -18,7 +18,7 @@ def make_params(exposure: str = "none") -> DeployParams:
         username="testuser",
         deployment_id="bagel-thinkmorph-20260807-120000-abcd",
         api_key="plain-secret-must-not-appear",
-        gpu_count=3,
+        gpu_count=2,
         hours=1,
         exposure=exposure,
         hf_token="hf-secret-must-not-appear",
@@ -42,11 +42,14 @@ def test_generated_dual_model_script_is_safe_and_valid(exposure: str) -> None:
     assert "hf-secret-must-not-appear" not in script
     assert "named-secret" not in script
     assert "#SBATCH --partition=gpuA40x4" in script
-    assert "#SBATCH --gpus-per-node=3" in script
+    assert "#SBATCH --gpus-per-node=2" in script
+    assert "#SBATCH --cpus-per-task=32" in script
+    assert "#SBATCH --mem=120g" in script
     assert "--model bagel-7b" in script
     assert "--model thinkmorph-7b" in script
     assert 'BAGEL_CUDA="${CUDA_IDS[0]}"' in script
     assert 'THINKMORPH_CUDA="${CUDA_IDS[1]},${CUDA_IDS[2]}"' in script
+    assert 'THINKMORPH_CUDA="${CUDA_IDS[1]}"' in script
     assert "ByteDance-Seed/BAGEL-7B-MoT" in script
     assert "ThinkMorph/ThinkMorph-7B" in script
     assert "DELTA_MULTIMODAL_API_KEY" in script
@@ -86,6 +89,14 @@ def test_runtime_sources_are_embedded() -> None:
     script = render_deploy_script(Config(), make_params())
     assert "printf '%s'" in script
     assert 'base64 -d > "$DEPLOY_DIR/runtime/worker.py"' in script
+
+
+def test_three_gpu_layout_keeps_two_gpus_for_thinkmorph() -> None:
+    script = render_deploy_script(Config(), replace(make_params(), gpu_count=3))
+    assert "#SBATCH --gpus-per-node=3" in script
+    assert "#SBATCH --cpus-per-task=48" in script
+    assert "#SBATCH --mem=220g" in script
+    assert "GPU_LAYOUT=bagel-7b:1,thinkmorph-7b:2" in script
 
 
 def test_recovery_is_explicit_and_scoped() -> None:

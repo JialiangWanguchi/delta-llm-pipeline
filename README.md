@@ -8,21 +8,21 @@ Internet client
      ▼
 FastAPI Gateway :8000
      ├── model=bagel-7b      → GPU 0
-     └── model=thinkmorph-7b → GPU 1–2
+     └── model=thinkmorph-7b → GPU 1
 ```
 
 ## 默认资源
 
 - Slurm 账户：`bhsz-delta-gpu`
 - 分区：`gpuA40x4`
-- 默认申请：3× NVIDIA A40 48GB
+- 默认申请：2× NVIDIA A40 48GB
 - BAGEL：1张A40
-- ThinkMorph：2张A40
+- ThinkMorph：1张A40
 - 默认时长：47.5小时；Delta上限48小时
-- 计费估算：3 × 0.5 × 47.5 = 71.25 weighted GPU-hours
+- 计费估算：2 × 0.5 × 47.5 = 47.5 weighted GPU-hours
 - 权重：约59.2GB，源码和权重位于 `/projects/bhsz/delta-llm/shared`；Python环境和包缓存在 `/work/nvme/bhsz/delta-llm/shared`
 
-第四张A40可用 `--gpus 4` 预留，但当前初版仍只将前三张分配给两个模型。
+两个约29.6GB的模型各自可装入一张48GB A40。`--gpus 3` 会让 ThinkMorph 使用两张卡以增加显存余量；`--gpus 4` 再预留一张卡。卡数越多通常越难排到，本项目默认使用2卡布局。
 
 ## 快速开始
 
@@ -33,7 +33,7 @@ git clone https://github.com/JialiangWanguchi/delta-llm-pipeline.git
 cd delta-llm-pipeline
 
 .\run.ps1 --username your_ncsa_username deploy `
-  --gpus 3 `
+  --gpus 2 `
   --hours 47.5 `
   --exposure cloudflare-quick `
   --acknowledge-external-tunnel
@@ -46,7 +46,7 @@ git clone https://github.com/JialiangWanguchi/delta-llm-pipeline.git
 cd delta-llm-pipeline
 
 ./run.sh --username your_ncsa_username deploy \
-  --gpus 3 \
+  --gpus 2 \
   --hours 47.5 \
   --exposure cloudflare-quick \
   --acknowledge-external-tunnel
@@ -57,7 +57,7 @@ OpenSSH 会提示一次NCSA密码和Duo。首次部署还会：
 1. 创建固定版本的Python/PyTorch/FlashAttention环境；
 2. 下载两个官方源码仓库；
 3. 下载约59GB模型权重；
-4. 提交一个3×A40 Slurm作业；
+4. 提交一个2×A40 Slurm作业；
 5. 等待两个Worker和Gateway全部健康；
 6. 返回一个Base URL、一个API key和本地状态文件。
 
@@ -67,7 +67,7 @@ OpenSSH 会提示一次NCSA密码和Duo。首次部署还会：
 
 ```powershell
 .\run.ps1 --username your_ncsa_username deploy `
-  --gpus 3 --hours 47.5 --exposure cloudflare-quick `
+  --gpus 2 --hours 47.5 --exposure cloudflare-quick `
   --acknowledge-external-tunnel --replace-existing-services --detach
 ```
 
@@ -109,7 +109,7 @@ for model in ("bagel-7b", "thinkmorph-7b"):
 .\run.ps1 models
 
 # 仅检查方案，不登录、不提交作业
-.\run.ps1 --username your_ncsa_username deploy --gpus 3 --hours 1 --dry-run
+.\run.ps1 --username your_ncsa_username deploy --gpus 2 --hours 1 --dry-run
 
 # 检查账户、A40分区、存储、网络和CUDA module
 .\run.ps1 --username your_ncsa_username doctor

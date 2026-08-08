@@ -58,6 +58,9 @@ def render_deploy_script(config: Config, params: DeployParams) -> str:
     offload_root = f"{config.work_root}/{params.username}/delta-llm/offload/{params.deployment_id}"
     legacy_env_dir = f"{config.shared_root}/envs/{env_name}"
     slurm_time = hours_to_slurm(params.hours)
+    thinkmorph_gpu_count = 1 if params.gpu_count == 2 else 2
+    service_cpus = 32 if params.gpu_count == 2 else 48
+    service_memory = "120g" if params.gpu_count == 2 else "220g"
     named_url = config.named_public_url if params.exposure == "cloudflare-named" else ""
     env_fingerprint = ";".join(
         (
@@ -309,7 +312,7 @@ DEPLOYMENT_ID=$DEPLOY_ID
 MODELS=bagel-7b,thinkmorph-7b
 GPU_PARTITION=gpuA40x4
 GPU_COUNT=$GPU_COUNT
-GPU_LAYOUT=bagel-7b:1,thinkmorph-7b:2
+GPU_LAYOUT=bagel-7b:1,thinkmorph-7b:{thinkmorph_gpu_count}
 EXPOSURE=$EXPOSURE
 METADATA
 chmod 600 "$DEPLOY_DIR/metadata.env"
@@ -323,9 +326,9 @@ cat >> "$DEPLOY_DIR/service.slurm" <<SERVICE_CONFIG
 #SBATCH --job-name=mm-{params.deployment_id[:20]}
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=48
+#SBATCH --cpus-per-task={service_cpus}
 #SBATCH --gpus-per-node={params.gpu_count}
-#SBATCH --mem=220g
+#SBATCH --mem={service_memory}
 #SBATCH --time={slurm_time}
 #SBATCH --requeue
 #SBATCH --output=$DEPLOY_DIR/logs/slurm_%j.out
@@ -360,15 +363,19 @@ cleanup() {{
 }}
 trap cleanup EXIT INT TERM
 
-ALLOCATED_CUDA="${{CUDA_VISIBLE_DEVICES:-0,1,2}}"
+ALLOCATED_CUDA="${{CUDA_VISIBLE_DEVICES:-0,1}}"
 IFS=',' read -r -a CUDA_IDS <<< "$ALLOCATED_CUDA"
-if [[ "${{#CUDA_IDS[@]}}" -lt 3 ]]; then
+if [[ "${{#CUDA_IDS[@]}}" -lt "$GPU_COUNT" ]]; then
   echo FAILED > "$DEPLOY_DIR/state"
-  echo "Expected at least 3 allocated GPUs, got $ALLOCATED_CUDA" >&2
+  echo "Expected at least $GPU_COUNT allocated GPUs, got $ALLOCATED_CUDA" >&2
   exit 30
 fi
 BAGEL_CUDA="${{CUDA_IDS[0]}}"
-THINKMORPH_CUDA="${{CUDA_IDS[1]}},${{CUDA_IDS[2]}}"
+if (( GPU_COUNT >= 3 )); then
+  THINKMORPH_CUDA="${{CUDA_IDS[1]}},${{CUDA_IDS[2]}}"
+else
+  THINKMORPH_CUDA="${{CUDA_IDS[1]}}"
+fi
 
 CUDA_VISIBLE_DEVICES="$BAGEL_CUDA" "$ENV_DIR/bin/python" \
   "$DEPLOY_DIR/runtime/worker.py" --model bagel-7b \
