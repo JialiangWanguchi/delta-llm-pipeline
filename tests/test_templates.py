@@ -51,6 +51,11 @@ def test_generated_dual_model_script_is_safe_and_valid(exposure: str) -> None:
     assert 'THINKMORPH_CUDA="${CUDA_IDS[1]},${CUDA_IDS[2]}"' in script
     assert 'THINKMORPH_CUDA="${CUDA_IDS[1]}"' in script
     assert script.count("--max-memory-gib 36") == 2
+    assert "PORT_BASE=$((20000 + SLURM_JOB_ID % 30000))" in script
+    assert '--port "$BAGEL_PORT"' in script
+    assert '--port "$THINKMORPH_PORT"' in script
+    assert '"http://127.0.0.1:$GATEWAY_PORT/v1/models"' in script
+    assert "http://127.0.0.1:8000" not in script
     assert "ByteDance-Seed/BAGEL-7B-MoT" in script
     assert "ThinkMorph/ThinkMorph-7B" in script
     assert "DELTA_MULTIMODAL_API_KEY" in script

@@ -110,4 +110,9 @@ def image_generation(payload: dict[str, Any]) -> dict[str, Any]:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+    uvicorn.run(
+        app,
+        host="127.0.0.1",
+        port=int(os.environ.get("GATEWAY_PORT", "8000")),
+        log_level="info",
+    )

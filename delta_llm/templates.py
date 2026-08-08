@@ -377,10 +377,23 @@ else
   THINKMORPH_CUDA="${{CUDA_IDS[1]}}"
 fi
 
+# Compute nodes can be shared by multiple jobs. Derive distinct loopback ports
+# from the Slurm job ID instead of assuming the conventional 8000/810x ports
+# are free on the whole node.
+PORT_BASE=$((20000 + SLURM_JOB_ID % 30000))
+BAGEL_PORT=$PORT_BASE
+THINKMORPH_PORT=$((PORT_BASE + 1))
+GATEWAY_PORT=$((PORT_BASE + 2))
+export BAGEL_WORKER_URL="http://127.0.0.1:$BAGEL_PORT"
+export THINKMORPH_WORKER_URL="http://127.0.0.1:$THINKMORPH_PORT"
+export GATEWAY_PORT
+printf 'BAGEL_PORT=%s\nTHINKMORPH_PORT=%s\nGATEWAY_PORT=%s\n' \
+  "$BAGEL_PORT" "$THINKMORPH_PORT" "$GATEWAY_PORT" > "$DEPLOY_DIR/ports.env"
+
 CUDA_VISIBLE_DEVICES="$BAGEL_CUDA" "$ENV_DIR/bin/python" \
   "$DEPLOY_DIR/runtime/worker.py" --model bagel-7b \
   --repo-dir "$BAGEL_REPO" --checkpoint-dir "$BAGEL_MODEL" \
-  --offload-dir "$OFFLOAD_ROOT/bagel" --max-memory-gib 36 --port 8101 \
+  --offload-dir "$OFFLOAD_ROOT/bagel" --max-memory-gib 36 --port "$BAGEL_PORT" \
   > "$DEPLOY_DIR/logs/bagel.log" 2>&1 &
 BAGEL_PID=$!
 PIDS+=("$BAGEL_PID")
@@ -388,7 +401,7 @@ PIDS+=("$BAGEL_PID")
 CUDA_VISIBLE_DEVICES="$THINKMORPH_CUDA" "$ENV_DIR/bin/python" \
   "$DEPLOY_DIR/runtime/worker.py" --model thinkmorph-7b \
   --repo-dir "$THINKMORPH_REPO" --checkpoint-dir "$THINKMORPH_MODEL" \
-  --offload-dir "$OFFLOAD_ROOT/thinkmorph" --max-memory-gib 36 --port 8102 \
+  --offload-dir "$OFFLOAD_ROOT/thinkmorph" --max-memory-gib 36 --port "$THINKMORPH_PORT" \
   > "$DEPLOY_DIR/logs/thinkmorph.log" 2>&1 &
 THINKMORPH_PID=$!
 PIDS+=("$THINKMORPH_PID")
@@ -410,15 +423,21 @@ wait_for_worker() {{
   tail -n 200 "$log" >&2 || true
   return 1
 }}
-wait_for_worker bagel 8101 "$BAGEL_PID" "$DEPLOY_DIR/logs/bagel.log"
-wait_for_worker thinkmorph 8102 "$THINKMORPH_PID" "$DEPLOY_DIR/logs/thinkmorph.log"
+wait_for_worker bagel "$BAGEL_PORT" "$BAGEL_PID" "$DEPLOY_DIR/logs/bagel.log"
+wait_for_worker thinkmorph "$THINKMORPH_PORT" "$THINKMORPH_PID" "$DEPLOY_DIR/logs/thinkmorph.log"
 
 "$ENV_DIR/bin/python" "$DEPLOY_DIR/runtime/gateway.py" \
   > "$DEPLOY_DIR/logs/gateway.log" 2>&1 &
 GATEWAY_PID=$!
 PIDS+=("$GATEWAY_PID")
+GATEWAY_READY=false
 for _ in $(seq 1 60); do
-  curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1 && break
+  if curl -fsS -H "Authorization: Bearer $DELTA_MULTIMODAL_API_KEY" \
+    "http://127.0.0.1:$GATEWAY_PORT/v1/models" | \
+    grep -q 'thinkmorph-7b'; then
+    GATEWAY_READY=true
+    break
+  fi
   kill -0 "$GATEWAY_PID" 2>/dev/null || {{
     echo FAILED > "$DEPLOY_DIR/state"
     tail -n 200 "$DEPLOY_DIR/logs/gateway.log" >&2 || true
@@ -426,16 +445,16 @@ for _ in $(seq 1 60); do
   }}
   sleep 2
 done
-curl -fsS http://127.0.0.1:8000/health >/dev/null || {{
+[[ "$GATEWAY_READY" == true ]] && kill -0 "$GATEWAY_PID" 2>/dev/null || {{
   echo FAILED > "$DEPLOY_DIR/state"; exit 32;
 }}
 
 case "$EXPOSURE" in
   none)
-    ENDPOINT="http://$(hostname -f):8000/v1"
+    ENDPOINT="http://$(hostname -f):$GATEWAY_PORT/v1"
     ;;
   cloudflare-quick)
-    "$CLOUDFLARED" tunnel --url http://127.0.0.1:8000 --no-autoupdate \
+    "$CLOUDFLARED" tunnel --url "http://127.0.0.1:$GATEWAY_PORT" --no-autoupdate \
       > "$DEPLOY_DIR/logs/cloudflared.log" 2>&1 &
     TUNNEL_PID=$!
     PIDS+=("$TUNNEL_PID")
