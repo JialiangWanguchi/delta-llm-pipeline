@@ -12,6 +12,7 @@ from .config import Config, load_config
 from .remote import (
     SSHRunner,
     ensure_interactive_terminal,
+    local_state_root,
     mark_local_state_stopped,
     save_local_state,
     validate_deployment_id,
@@ -53,6 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--recover-stalled-setup",
         action="store_true",
         help="Cancel this user's delta-mm-setup jobs and replace the incomplete legacy env",
+    )
+    deploy.add_argument(
+        "--replace-existing-services",
+        action="store_true",
+        help="Cancel this user's pending/running BAGEL+ThinkMorph service jobs first",
     )
     deploy.add_argument("--dry-run", action="store_true", help="Validate without SSH or Slurm")
 
@@ -124,6 +130,7 @@ def collect_deploy_params(args: argparse.Namespace, config: Config, username: st
         cf_tunnel_token=cf_token,
         detach=bool(args.detach),
         recover_stalled_setup=bool(args.recover_stalled_setup),
+        replace_existing_services=bool(args.replace_existing_services),
     )
 
 
@@ -196,7 +203,21 @@ def run_remote_command(args: argparse.Namespace, config: Config) -> int:
         runner.run_script(render_list_script(config, username))
     elif args.command == "status":
         deployment_id = validate_deployment_id(args.deployment_id)
-        runner.run_script(render_status_script(config, username, deployment_id))
+        result = runner.run_script(render_status_script(config, username, deployment_id))
+        local_path = local_state_root() / f"{deployment_id}.json"
+        if result is not None and local_path.exists():
+            state = json.loads(local_path.read_text(encoding="utf-8"))
+            state["job_id"] = result.job_id
+            state["state"] = result.state
+            if result.endpoint not in {"", "-"}:
+                state["endpoint"] = result.endpoint
+            if result.expires_at not in {"", "-"}:
+                state["expires_at"] = result.expires_at
+            save_local_state(
+                deployment_id,
+                json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+            )
+            print(f"Updated local deployment state: {local_path}")
     elif args.command == "logs":
         deployment_id = validate_deployment_id(args.deployment_id)
         if not 1 <= args.lines <= 5000:

@@ -25,6 +25,7 @@ def make_params(exposure: str = "none") -> DeployParams:
         cf_tunnel_token="named-secret" if exposure == "cloudflare-named" else "",
         detach=False,
         recover_stalled_setup=False,
+        replace_existing_services=False,
     )
 
 
@@ -93,6 +94,14 @@ def test_recovery_is_explicit_and_scoped() -> None:
     assert "RECOVER_STALLED_SETUP=true" in script
     assert 'squeue -h -u "$USER" -n delta-mm-setup' in script
     assert 'rm -rf "$LEGACY_ENV_DIR.installing" "$LEGACY_ENV_DIR"' in script
+
+
+def test_service_replacement_is_explicit_and_scoped() -> None:
+    params = replace(make_params(), replace_existing_services=True)
+    script = render_deploy_script(Config(), params)
+    assert "REPLACE_EXISTING_SERVICES=true" in script
+    assert "/^mm-bagel-thinkmorph-/" in script
+    assert 'scancel "${OLD_SERVICE_JOBS[@]}"' in script
 
 
 def test_setup_status_script_is_read_only_and_valid() -> None:

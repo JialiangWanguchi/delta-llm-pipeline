@@ -38,6 +38,7 @@ class DeployParams:
     cf_tunnel_token: str
     detach: bool
     recover_stalled_setup: bool
+    replace_existing_services: bool
 
 
 def render_deploy_script(config: Config, params: DeployParams) -> str:
@@ -103,6 +104,7 @@ ENV_FINGERPRINT={q(env_fingerprint)}
 BAGEL_COMMIT={q(config.bagel_commit)}
 THINKMORPH_COMMIT={q(config.thinkmorph_commit)}
 RECOVER_STALLED_SETUP={str(params.recover_stalled_setup).lower()}
+REPLACE_EXISTING_SERVICES={str(params.replace_existing_services).lower()}
 
 echo "[delta-multimodal] validating allocation, partition, and storage"
 accounts | grep -F "$ACCOUNT" >/dev/null || {{
@@ -121,6 +123,21 @@ chmod 700 "$DEPLOY_DIR" "$DEPLOY_DIR/secrets"
 chmod 2770 "$SHARED_ROOT" "$RUNTIME_ROOT" "$RUNTIME_ROOT/envs" \
   "$RUNTIME_ROOT/conda-pkgs" "$RUNTIME_ROOT/pip-cache" "$SOURCE_ROOT" \
   "$MODEL_ROOT" "$SHARED_ROOT/bin" || true
+
+if [[ "$REPLACE_EXISTING_SERVICES" == true ]]; then
+  echo "[delta-multimodal] cancelling this user's previous dual-model service jobs"
+  mapfile -t OLD_SERVICE_JOBS < <(
+    squeue -h -u "$USER" -o '%A|%j' | \
+      awk -F'|' '$2 ~ /^mm-bagel-thinkmorph-/ {{print $1}}' | sort -u
+  )
+  if (( ${{#OLD_SERVICE_JOBS[@]}} )); then
+    scancel "${{OLD_SERVICE_JOBS[@]}}"
+    for _ in $(seq 1 30); do
+      squeue -h -j "$(IFS=,; echo "${{OLD_SERVICE_JOBS[*]}}")" | grep -q . || break
+      sleep 2
+    done
+  fi
+fi
 
 if [[ "$RECOVER_STALLED_SETUP" == true ]]; then
   echo "[delta-multimodal] cancelling this user's stalled setup jobs"

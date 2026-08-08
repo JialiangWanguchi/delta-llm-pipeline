@@ -63,6 +63,16 @@ OpenSSH 会提示一次NCSA密码和Duo。首次部署还会：
 
 同组后续部署会复用共享环境及权重。首次初始化可能耗时较长，不要关闭认证窗口。
 
+如果需要替换自己此前排队或运行中的双模型作业，并让本地立即保存新 key 后退出 SSH：
+
+```powershell
+.\run.ps1 --username your_ncsa_username deploy `
+  --gpus 3 --hours 47.5 --exposure cloudflare-quick `
+  --acknowledge-external-tunnel --replace-existing-services --detach
+```
+
+后台作业 READY 后运行 `status DEPLOYMENT_ID`，会把远端 URL 和状态合并回本地 JSON，同时保留原 API key。
+
 ## 调用两个模型
 
 同一个Base URL和key可用于两个模型：
