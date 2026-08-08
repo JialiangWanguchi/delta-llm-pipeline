@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -70,46 +71,50 @@ class SSHRunner:
             self.destination,
             "bash -s",
         ]
-        try:
-            process = subprocess.Popen(
-                command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                bufsize=1,
-            )
-        except FileNotFoundError as exc:
-            raise RuntimeError(
-                "OpenSSH client not found. Install/enable the 'ssh' command."
-            ) from exc
-
-        assert process.stdin is not None
-        assert process.stdout is not None
         wire_script = script.replace("\r\n", "\n").replace("\r", "\n")
-        process.stdin.write(wire_script.encode("utf-8"))
-        process.stdin.close()
+        # A seekable temporary stream lets OpenSSH consume the script only after
+        # password+Duo authentication. This avoids Windows pipe-buffer warnings
+        # and BrokenPipe errors when a large generated script is sent too early.
+        with tempfile.TemporaryFile(mode="w+b") as script_stream:
+            script_stream.write(wire_script.encode("utf-8"))
+            script_stream.seek(0)
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdin=script_stream,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                )
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    "OpenSSH client not found. Install/enable the 'ssh' command."
+                ) from exc
 
-        parsed: RemoteResult | None = None
-        output_log = os.environ.get("DELTA_LLM_OUTPUT_LOG")
-        log_handle = None
-        if output_log:
-            log_path = Path(output_log).expanduser()
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            log_handle = log_path.open("a", encoding="utf-8")
-        try:
-            for raw_line in process.stdout:
-                line = raw_line.decode("utf-8", errors="replace")
-                print(line, end="", flush=True)
+            assert process.stdout is not None
+            parsed: RemoteResult | None = None
+            output_log = os.environ.get("DELTA_LLM_OUTPUT_LOG")
+            log_handle = None
+            if output_log:
+                log_path = Path(output_log).expanduser()
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_handle = log_path.open("a", encoding="utf-8")
+            try:
+                for line in process.stdout:
+                    print(line, end="", flush=True)
+                    if log_handle:
+                        log_handle.write(line)
+                        log_handle.flush()
+                    if line.startswith(RESULT_PREFIX):
+                        parsed = parse_result_line(line.rstrip("\r\n"))
+            finally:
                 if log_handle:
-                    log_handle.write(line)
-                    log_handle.flush()
-                if line.startswith(RESULT_PREFIX):
-                    parsed = parse_result_line(line.rstrip("\r\n"))
-        finally:
-            if log_handle:
-                log_handle.close()
+                    log_handle.close()
 
-        return_code = process.wait()
+            return_code = process.wait()
         if return_code != 0:
             raise RuntimeError(f"Remote SSH operation failed with exit code {return_code}")
         return parsed
