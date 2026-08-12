@@ -4,6 +4,7 @@ import argparse
 import base64
 import io
 import json
+import logging
 import os
 import random
 import re
@@ -29,6 +30,7 @@ MODEL_CONFIG = {
         "layer_module": "Qwen2MoTDecoderLayer",
     },
 }
+LOGGER = logging.getLogger("delta_llm.worker")
 
 
 def parse_args() -> argparse.Namespace:
@@ -177,7 +179,11 @@ class ModelRuntime:
                 checkpoint=str(checkpoint_dir / config_entry["checkpoint"]),
                 device_map=device_map,
                 dtype=torch.bfloat16,
-                force_hooks=False,
+                # Keep Accelerate's input-alignment hooks even though every
+                # weight is resident on one GPU. The official inferencer builds
+                # request tensors on CPU and relies on these hooks to move them
+                # to the model device. This does not enable CPU/disk offload.
+                force_hooks=True,
             ).eval()
         else:
             max_memory = {
@@ -236,6 +242,10 @@ class ModelRuntime:
             ),
             flush=True,
         )
+        # The VAE is loaded separately from the main checkpoint and therefore
+        # is not covered by Accelerate's device map. Keep it resident too so
+        # image editing/generation never mixes a CUDA latent with CPU weights.
+        vae_model = vae_model.to(device="cuda:0", dtype=torch.bfloat16).eval()
         return InterleaveInferencer(
             model=model,
             vae_model=vae_model,
@@ -374,6 +384,12 @@ def create_app(runtime: ModelRuntime) -> FastAPI:
         except torch.cuda.OutOfMemoryError as exc:
             torch.cuda.empty_cache()
             raise HTTPException(status_code=507, detail="GPU out of memory") from exc
+        except Exception as exc:
+            LOGGER.exception("unhandled %s inference failure", runtime.model_name)
+            raise HTTPException(
+                status_code=500,
+                detail=f"{type(exc).__name__}: {exc}",
+            ) from exc
 
     return app
 
