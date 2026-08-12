@@ -45,7 +45,7 @@ def render_deploy_script(config: Config, params: DeployParams) -> str:
     user_root = f"{config.project_root}/{params.username}/delta-llm"
     deploy_dir = f"{user_root}/deployments/{params.deployment_id}"
     env_name = (
-        f"multimodal-py{config.python_version}-torch{config.torch_version}-{config.cuda_wheel}"
+        f"multimodal-h200-sm90-py{config.python_version}-torch{config.torch_version}-{config.cuda_wheel}"
     )
     env_dir = f"{config.runtime_root}/envs/{env_name}"
     source_root = f"{config.shared_root}/sources"
@@ -58,9 +58,9 @@ def render_deploy_script(config: Config, params: DeployParams) -> str:
     offload_root = f"{config.work_root}/{params.username}/delta-llm/offload/{params.deployment_id}"
     legacy_env_dir = f"{config.shared_root}/envs/{env_name}"
     slurm_time = hours_to_slurm(params.hours)
-    replicas_per_model = params.gpu_count // 2
-    service_cpus = 32 if params.gpu_count == 2 else 48
-    service_memory = "120g" if params.gpu_count == 2 else "220g"
+    replicas_per_model = 2
+    service_cpus = 48
+    service_memory = "240g"
     named_url = config.named_public_url if params.exposure == "cloudflare-named" else ""
     env_fingerprint = ";".join(
         (
@@ -71,6 +71,7 @@ def render_deploy_script(config: Config, params: DeployParams) -> str:
             f"cuda={config.cuda_wheel}",
             f"bagel={config.bagel_commit}",
             f"thinkmorph={config.thinkmorph_commit}",
+            "gpu=h200-sm90",
         )
     )
     worker_b64 = b64(runtime_source("runtime_worker.py"))
@@ -114,8 +115,8 @@ accounts | grep -F "$ACCOUNT" >/dev/null || {{
   echo "ERROR: account $ACCOUNT is not available to $USER" >&2
   exit 20
 }}
-sinfo -h -p gpuA100x4 -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' || {{
-  echo "ERROR: gpuA100x4 is unavailable" >&2
+sinfo -h -p gpuH200x8 -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' || {{
+  echo "ERROR: gpuH200x8 is unavailable" >&2
   exit 23
 }}
 mkdir -p "$USER_ROOT/deployments" "$DEPLOY_DIR/logs" "$DEPLOY_DIR/secrets" \
@@ -200,7 +201,7 @@ if ! env_ready; then
     cat > "$DEPLOY_DIR/setup.slurm" <<SETUP_SLURM
 #!/usr/bin/env bash
 #SBATCH --account={config.account}
-#SBATCH --partition=gpuA100x4
+#SBATCH --partition=gpuH200x8
 #SBATCH --job-name=delta-mm-setup
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -310,7 +311,7 @@ fi
 cat > "$DEPLOY_DIR/metadata.env" <<METADATA
 DEPLOYMENT_ID=$DEPLOY_ID
 MODELS=bagel-7b,thinkmorph-7b
-GPU_PARTITION=gpuA100x4
+GPU_PARTITION=gpuH200x8
 GPU_COUNT=$GPU_COUNT
 GPU_LAYOUT=bagel-7b:{replicas_per_model}-replicas,thinkmorph-7b:{replicas_per_model}-replicas
 EXPOSURE=$EXPOSURE
@@ -322,7 +323,7 @@ cat > "$DEPLOY_DIR/service.slurm" <<'SERVICE_HEADER'
 SERVICE_HEADER
 cat >> "$DEPLOY_DIR/service.slurm" <<SERVICE_CONFIG
 #SBATCH --account={config.account}
-#SBATCH --partition=gpuA100x4
+#SBATCH --partition=gpuH200x8
 #SBATCH --job-name=mm-{params.deployment_id[:20]}
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -370,14 +371,13 @@ if [[ "${{#CUDA_IDS[@]}}" -lt "$GPU_COUNT" ]]; then
   echo "Expected at least $GPU_COUNT allocated GPUs, got $ALLOCATED_CUDA" >&2
   exit 30
 fi
-REPLICAS_PER_MODEL=$((GPU_COUNT / 2))
-(( REPLICAS_PER_MODEL >= 1 )) || {{ echo FAILED > "$DEPLOY_DIR/state"; exit 30; }}
+REPLICAS_PER_MODEL=2
 
 # Compute nodes can be shared by multiple jobs. Derive distinct loopback ports
 # from the Slurm job ID instead of assuming the conventional 8000/810x ports
 # are free on the whole node.
 PORT_BASE=$((20000 + SLURM_JOB_ID % 30000))
-GATEWAY_PORT=$((PORT_BASE + GPU_COUNT))
+GATEWAY_PORT=$((PORT_BASE + 4))
 export GATEWAY_PORT
 BAGEL_URLS=()
 THINKMORPH_URLS=()
@@ -388,9 +388,8 @@ WORKER_LOGS=()
 : > "$DEPLOY_DIR/ports.env"
 
 for ((replica=0; replica<REPLICAS_PER_MODEL; replica++)); do
-  BAGEL_CUDA="${{CUDA_IDS[$replica]}}"
-  THINKMORPH_INDEX=$((replica + REPLICAS_PER_MODEL))
-  THINKMORPH_CUDA="${{CUDA_IDS[$THINKMORPH_INDEX]}}"
+  BAGEL_CUDA="${{CUDA_IDS[0]}}"
+  THINKMORPH_CUDA="${{CUDA_IDS[1]}}"
   BAGEL_PORT=$((PORT_BASE + replica))
   THINKMORPH_PORT=$((PORT_BASE + REPLICAS_PER_MODEL + replica))
   BAGEL_LOG="$DEPLOY_DIR/logs/bagel_${{replica}}.log"
@@ -530,7 +529,9 @@ if [[ {str(params.detach).lower()} == true ]]; then
   exit 0
 fi
 
-for _ in $(seq 1 600); do
+# Keep the single authenticated SSH session alive through long fair-share queues.
+# The Slurm job itself, not this client-side wait loop, owns the 48-hour runtime.
+for _ in $(seq 1 12000); do
   STATE="$(cat "$DEPLOY_DIR/state" 2>/dev/null || true)"
   if [[ "$STATE" == READY && -s "$DEPLOY_DIR/endpoint" ]]; then
     ENDPOINT="$(< "$DEPLOY_DIR/endpoint")"
@@ -626,8 +627,8 @@ def render_doctor_script(config: Config) -> str:
 set -euo pipefail
 echo '=== ACCOUNT ==='
 accounts
-echo '=== A100 PARTITION ==='
-sinfo -p gpuA100x4 -o '%P %a %l %D %t %G'
+echo '=== H200 PARTITION ==='
+sinfo -p gpuH200x8 -o '%P %a %l %D %t %G'
 echo '=== STORAGE ==='
 quota 2>/dev/null || true
 echo '=== OUTBOUND ==='

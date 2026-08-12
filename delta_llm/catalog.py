@@ -59,16 +59,23 @@ GPU_SPECS: dict[str, GPUSpec] = {
         vram_gb=40,
         max_gpus=4,
         charge_factor=1.0,
-    )
+    ),
+    "h200": GPUSpec(
+        key="h200",
+        label="NVIDIA H200 141 GB",
+        partition="gpuH200x8",
+        vram_gb=141,
+        max_gpus=8,
+        charge_factor=3.0,
+    ),
 }
 
 
 def validate_gpu_count(gpu_count: int) -> tuple[bool, str]:
-    if gpu_count not in {2, 4}:
-        return False, "双模型服务需要 2 或 4 张 A100"
-    replicas = gpu_count // 2
-    return True, f"BAGEL {replicas} 个副本 + ThinkMorph {replicas} 个副本"
+    if gpu_count != 2:
+        return False, "双模型服务固定使用 2 张 H200"
+    return True, "H200-0: BAGEL 2个副本；H200-1: ThinkMorph 2个副本"
 
 
 def estimate_weighted_gpu_hours(gpu_count: int, hours: float) -> float:
-    return gpu_count * hours * GPU_SPECS["a100"].charge_factor
+    return gpu_count * hours * GPU_SPECS["h200"].charge_factor

@@ -168,8 +168,8 @@ class ModelRuntime:
         torch.set_float32_matmul_precision("high")
 
         if self.args.load_mode == "resident":
-            # Both checkpoints are ~29.2 GB. A Delta A100 40 GB can hold one
-            # complete BF16 model, and avoiding Accelerate's disk hooks removes
+            # Both checkpoints are ~29.2 GB. A Delta H200 141 GB can hold two
+            # complete BF16 replicas, and avoiding Accelerate's disk hooks removes
             # the dominant per-token NVMe transfer cost.
             device_map: dict[str, Any] = {"": 0}
             model = load_checkpoint_and_dispatch(

@@ -30,10 +30,12 @@ long synchronous inference rather than a crashed Slurm job or tunnel.
 
 ## Implemented remediation
 
-1. Load each ~29.2 GB BF16 checkpoint fully on one A100 and fail startup if any
-   module is assigned to CPU or disk.
-2. Use four A100 GPUs as two BAGEL replicas and two ThinkMorph replicas. Each
-   model can now execute two requests concurrently; excess work is queued.
+1. Load every ~29.2 GB BF16 replica fully on H200 and fail startup if any module
+   is assigned to CPU or disk.
+2. Use two 141 GB H200 GPUs. H200-0 hosts two BAGEL replicas and H200-1 hosts
+   two ThinkMorph replicas. Each model can execute two requests concurrently;
+   excess work is queued. This supersedes the four-A100 plan that did not obtain
+   a full node before the original client-side wait deadline.
 3. Add `POST /v1/jobs`, job status, queue position, and result endpoints so long
    requests return immediately and do not depend on Cloudflare's read timeout.
 4. Default image-understanding output to 128 tokens and accept the explicit

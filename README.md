@@ -14,15 +14,15 @@ FastAPI Gateway :8000
 ## 默认资源
 
 - Slurm 账户：`bhsz-delta-gpu`
-- 分区：`gpuA100x4`
-- 推荐申请：4× NVIDIA A100 40GB
-- BAGEL：2个单卡常驻显存副本
-- ThinkMorph：2个单卡常驻显存副本
+- 分区：`gpuH200x8`
+- 固定申请：2× NVIDIA H200 141GB
+- BAGEL：2个常驻显存副本，共享H200-0
+- ThinkMorph：2个常驻显存副本，共享H200-1
 - 默认时长：47.5小时；Delta上限48小时
-- 计费估算：4 × 1.0 × 47.5 = 190 weighted GPU-hours
+- 计费估算：2 × 3.0 × 47.5 = 285 weighted GPU-hours
 - 权重：约59.2GB，源码和权重位于 `/projects/bhsz/delta-llm/shared`；Python环境和包缓存在 `/work/nvme/bhsz/delta-llm/shared`
 
-两个约29.2GB的checkpoint均完整常驻A100显存。启动检查发现任何CPU/磁盘卸载都会直接失败，避免服务表面健康但每个token都从NVMe搬运权重。`--gpus 2` 表示每个模型一个副本；`--gpus 4` 表示每个模型两个副本，可让同一个模型并行处理两项推理。4卡更快且支持并发，但排队通常更久、计费是2卡方案的两倍。
+两个约29.2GB的checkpoint均完整常驻H200显存。每张141GB H200同时容纳同一模型的两个独立副本；启动检查发现任何CPU/磁盘卸载都会直接失败。这样只申请2张GPU便可让同一个模型并行处理两项推理，也避免4×A100整节点请求长期无法回填。H200收费系数为3.0，因此47.5小时约285 weighted GPU-hours。
 
 ## 快速开始
 
@@ -33,7 +33,7 @@ git clone https://github.com/JialiangWanguchi/delta-llm-pipeline.git
 cd delta-llm-pipeline
 
 .\run.ps1 --username your_ncsa_username deploy `
-  --gpus 4 `
+  --gpus 2 `
   --hours 47.5 `
   --exposure cloudflare-quick `
   --acknowledge-external-tunnel
@@ -46,7 +46,7 @@ git clone https://github.com/JialiangWanguchi/delta-llm-pipeline.git
 cd delta-llm-pipeline
 
 ./run.sh --username your_ncsa_username deploy \
-  --gpus 4 \
+  --gpus 2 \
   --hours 47.5 \
   --exposure cloudflare-quick \
   --acknowledge-external-tunnel
@@ -57,7 +57,7 @@ OpenSSH 会提示一次NCSA密码和Duo。首次部署还会：
 1. 创建固定版本的Python/PyTorch/FlashAttention环境；
 2. 下载两个官方源码仓库；
 3. 下载约59GB模型权重；
-4. 提交一个4×A100 Slurm作业；
+4. 提交一个2×H200 Slurm作业；
 5. 等待两个Worker和Gateway全部健康；
 6. 返回一个Base URL、一个API key和本地状态文件。
 
@@ -67,7 +67,7 @@ OpenSSH 会提示一次NCSA密码和Duo。首次部署还会：
 
 ```powershell
 .\run.ps1 --username your_ncsa_username deploy `
-  --gpus 4 --hours 47.5 --exposure cloudflare-quick `
+  --gpus 2 --hours 47.5 --exposure cloudflare-quick `
   --acknowledge-external-tunnel --replace-existing-services --detach
 ```
 
@@ -112,7 +112,7 @@ for model in ("bagel-7b", "thinkmorph-7b"):
 # 仅检查方案，不登录、不提交作业
 .\run.ps1 --username your_ncsa_username deploy --gpus 2 --hours 1 --dry-run
 
-# 检查账户、A100分区、存储、网络和CUDA module
+# 检查账户、H200分区、存储、网络和CUDA module
 .\run.ps1 --username your_ncsa_username doctor
 
 # 查看首次共享安装作业、模型文件大小和最近安装日志（只读）
@@ -145,7 +145,7 @@ Linux/macOS: ~/.delta-llm/deployments/DEPLOYMENT_ID.json
 | `bagel-7b` | ✓ | ✓ | ✓ | 单轮thinking |
 | `thinkmorph-7b` | ✓ | ✓ | ✓ | ✓ |
 
-图片理解建议从 `thinking=false`、`max_output_tokens=128` 开始。图像生成建议从 `512x512`、`steps=20` 开始。4卡布局下每个模型有2个副本，同模型可同时执行2项推理；更多请求由 `/v1/jobs` 排队且可查询位置。
+图片理解建议从 `thinking=false`、`max_output_tokens=128` 开始。图像生成建议从 `512x512`、`steps=20` 开始。2×H200布局下每个模型有2个常驻副本，同模型可同时执行2项推理；更多请求由 `/v1/jobs` 排队且可查询位置。
 
 ## 暴露模式
 
