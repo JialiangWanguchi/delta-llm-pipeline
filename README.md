@@ -7,22 +7,22 @@ Internet client
      │  one HTTPS URL + one Bearer key
      ▼
 FastAPI Gateway :8000
-     ├── model=bagel-7b      → GPU 0
-     └── model=thinkmorph-7b → GPU 1
+     ├── model=bagel-7b      → GPU 0, GPU 1（两个副本）
+     └── model=thinkmorph-7b → GPU 2, GPU 3（两个副本）
 ```
 
 ## 默认资源
 
 - Slurm 账户：`bhsz-delta-gpu`
 - 分区：`gpuA100x4`
-- 默认申请：2× NVIDIA A100 40GB
-- BAGEL：1张A100
-- ThinkMorph：1张A100
+- 推荐申请：4× NVIDIA A100 40GB
+- BAGEL：2个单卡常驻显存副本
+- ThinkMorph：2个单卡常驻显存副本
 - 默认时长：47.5小时；Delta上限48小时
-- 计费估算：2 × 1.0 × 47.5 = 95 weighted GPU-hours
+- 计费估算：4 × 1.0 × 47.5 = 190 weighted GPU-hours
 - 权重：约59.2GB，源码和权重位于 `/projects/bhsz/delta-llm/shared`；Python环境和包缓存在 `/work/nvme/bhsz/delta-llm/shared`
 
-两个约29.6GB的模型各自部署到一张40GB A100，并把每个进程的模型映射上限设为36GiB以保留运行余量。`--gpus 3` 会让 ThinkMorph 使用两张卡；`--gpus 4` 再预留一张卡。卡数越多通常越难排到，本项目默认使用2卡布局。
+两个约29.2GB的checkpoint均完整常驻A100显存。启动检查发现任何CPU/磁盘卸载都会直接失败，避免服务表面健康但每个token都从NVMe搬运权重。`--gpus 2` 表示每个模型一个副本；`--gpus 4` 表示每个模型两个副本，可让同一个模型并行处理两项推理。4卡更快且支持并发，但排队通常更久、计费是2卡方案的两倍。
 
 ## 快速开始
 
@@ -33,7 +33,7 @@ git clone https://github.com/JialiangWanguchi/delta-llm-pipeline.git
 cd delta-llm-pipeline
 
 .\run.ps1 --username your_ncsa_username deploy `
-  --gpus 2 `
+  --gpus 4 `
   --hours 47.5 `
   --exposure cloudflare-quick `
   --acknowledge-external-tunnel
@@ -46,7 +46,7 @@ git clone https://github.com/JialiangWanguchi/delta-llm-pipeline.git
 cd delta-llm-pipeline
 
 ./run.sh --username your_ncsa_username deploy \
-  --gpus 2 \
+  --gpus 4 \
   --hours 47.5 \
   --exposure cloudflare-quick \
   --acknowledge-external-tunnel
@@ -57,7 +57,7 @@ OpenSSH 会提示一次NCSA密码和Duo。首次部署还会：
 1. 创建固定版本的Python/PyTorch/FlashAttention环境；
 2. 下载两个官方源码仓库；
 3. 下载约59GB模型权重；
-4. 提交一个2×A100 Slurm作业；
+4. 提交一个4×A100 Slurm作业；
 5. 等待两个Worker和Gateway全部健康；
 6. 返回一个Base URL、一个API key和本地状态文件。
 
@@ -67,7 +67,7 @@ OpenSSH 会提示一次NCSA密码和Duo。首次部署还会：
 
 ```powershell
 .\run.ps1 --username your_ncsa_username deploy `
-  --gpus 2 --hours 47.5 --exposure cloudflare-quick `
+  --gpus 4 --hours 47.5 --exposure cloudflare-quick `
   --acknowledge-external-tunnel --replace-existing-services --detach
 ```
 
@@ -75,7 +75,7 @@ OpenSSH 会提示一次NCSA密码和Duo。首次部署还会：
 
 ## 调用两个模型
 
-同一个Base URL和key可用于两个模型：
+同一个Base URL和key可用于两个模型。对于图片理解、编辑和生成，推荐使用异步任务接口：提交操作会立即返回，不受Cloudflare同步读取超时影响。
 
 ```python
 import requests
@@ -85,19 +85,20 @@ headers = {"Authorization": "Bearer sk-delta-mm-..."}
 
 for model in ("bagel-7b", "thinkmorph-7b"):
     response = requests.post(
-        f"{base_url}/generate",
+        f"{base_url}/jobs",
         headers=headers,
         json={
             "model": model,
-            "task": "text-to-image",
-            "prompt": "A red robot reading in a university library",
-            "size": "512x512",
-            "steps": 30,
+            "task": "image-understanding",
+            "prompt": "Describe the important objects and their spatial relationships.",
+            "image": "data:image/jpeg;base64,...",
+            "thinking": False,
+            "max_output_tokens": 128,
         },
-        timeout=3600,
+        timeout=30,
     )
     response.raise_for_status()
-    print(model, response.json()["id"])
+    print(model, response.json()["id"], response.json()["status_url"])
 ```
 
 完整请求字段、图片编辑、图片理解、响应格式和错误码见 [API文档](docs/API.md)。
@@ -144,7 +145,7 @@ Linux/macOS: ~/.delta-llm/deployments/DEPLOYMENT_ID.json
 | `bagel-7b` | ✓ | ✓ | ✓ | 单轮thinking |
 | `thinkmorph-7b` | ✓ | ✓ | ✓ | ✓ |
 
-推荐首先使用 `512x512`、`steps=30`、并发1。确认显存和延迟后再提升到1024像素、多轮或更多thinking tokens。
+图片理解建议从 `thinking=false`、`max_output_tokens=128` 开始。图像生成建议从 `512x512`、`steps=20` 开始。4卡布局下每个模型有2个副本，同模型可同时执行2项推理；更多请求由 `/v1/jobs` 排队且可查询位置。
 
 ## 暴露模式
 

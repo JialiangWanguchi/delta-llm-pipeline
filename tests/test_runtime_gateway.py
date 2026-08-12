@@ -1,5 +1,6 @@
 import importlib
 import sys
+import time
 
 import pytest
 from fastapi import HTTPException
@@ -24,3 +25,28 @@ def test_gateway_rejects_unknown_model(monkeypatch) -> None:
     with pytest.raises(HTTPException) as exc:
         gateway.worker_request("not-a-model", {"prompt": "x"})
     assert exc.value.status_code == 400
+
+
+def test_async_job_completes_and_returns_result(monkeypatch) -> None:
+    gateway = load_gateway(monkeypatch)
+    monkeypatch.setattr(
+        gateway,
+        "worker_request_to",
+        lambda worker, payload: {
+            "model": payload["model"],
+            "task": payload["task"],
+            "text": "two cats",
+            "images": [],
+        },
+    )
+    manager = gateway.JobManager()
+    job = manager.submit(
+        {"model": "bagel-7b", "task": "image-understanding", "prompt": "describe"}
+    )
+    deadline = time.time() + 2
+    while job.status not in {"succeeded", "failed"} and time.time() < deadline:
+        time.sleep(0.01)
+    assert job.status == "succeeded"
+    assert job.result is not None
+    assert job.result["text"] == "two cats"
+    assert job.payload is None

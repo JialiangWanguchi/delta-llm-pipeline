@@ -64,13 +64,10 @@ GPU_SPECS: dict[str, GPUSpec] = {
 
 
 def validate_gpu_count(gpu_count: int) -> tuple[bool, str]:
-    if gpu_count not in {2, 3, 4}:
-        return False, "双模型服务需要 2–4 张 A100"
-    thinkmorph_gpus = 1 if gpu_count == 2 else 2
-    layout = f"BAGEL 1 张 + ThinkMorph {thinkmorph_gpus} 张"
-    if gpu_count == 4:
-        layout += " + 1 张预留卡"
-    return True, layout
+    if gpu_count not in {2, 4}:
+        return False, "双模型服务需要 2 或 4 张 A100"
+    replicas = gpu_count // 2
+    return True, f"BAGEL {replicas} 个副本 + ThinkMorph {replicas} 个副本"
 
 
 def estimate_weighted_gpu_hours(gpu_count: int, hours: float) -> float:

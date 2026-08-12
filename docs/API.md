@@ -38,6 +38,81 @@ curl "$DELTA_LLM_BASE_URL/models" \
 
 ## 统一生成接口
 
+耗时的多模态任务应优先使用异步接口。`POST /v1/jobs` 只负责入队，通常会在数秒内返回 `202`，因此不会被Cloudflare约125秒的代理读取超时截断。
+
+### 提交异步任务
+
+```http
+POST /v1/jobs
+Content-Type: application/json
+```
+
+请求体与下面的 `/v1/generate` 完全相同：
+
+```python
+import base64
+import requests
+
+encoded = base64.b64encode(open("input.jpg", "rb").read()).decode()
+job = requests.post(
+    f"{base_url}/jobs",
+    headers={"Authorization": f"Bearer {api_key}"},
+    json={
+        "model": "bagel-7b",
+        "task": "image-understanding",
+        "prompt": "请分析主要物体、数量以及空间关系，只输出简短中文。",
+        "image": encoded,
+        "thinking": False,
+        "max_output_tokens": 128,
+    },
+    timeout=30,
+).json()
+print(job["id"], job["queue_position"])
+```
+
+提交响应：
+
+```json
+{
+  "id": "job-...",
+  "object": "inference.job",
+  "model": "bagel-7b",
+  "status": "queued",
+  "queue_position": 1,
+  "status_url": "/v1/jobs/job-...",
+  "result_url": "/v1/jobs/job-.../result"
+}
+```
+
+### 查询进度和结果
+
+```python
+import time
+
+job_id = job["id"]
+while True:
+    status_response = requests.get(
+        f"{base_url}/jobs/{job_id}", headers=headers, timeout=30
+    )
+    status_response.raise_for_status()
+    status = status_response.json()
+    print(status["status"], status["queue_position"], status["elapsed_seconds"])
+    if status["status"] in {"succeeded", "failed"}:
+        break
+    time.sleep(3)
+
+result_response = requests.get(
+    f"{base_url}/jobs/{job_id}/result", headers=headers, timeout=30
+)
+result_response.raise_for_status()
+result = result_response.json()
+print(result["text"], result["elapsed_seconds"])
+```
+
+任务状态为 `queued`、`running`、`succeeded` 或 `failed`。结果保留2小时；4卡部署为每个模型启动两个独立副本，因此每个模型最多同时执行两个任务，其余请求按模型分别排队。
+
+### 同步接口（兼容旧客户端）
+
 ```http
 POST /v1/generate
 Content-Type: application/json
@@ -53,7 +128,8 @@ Content-Type: application/json
 | `image` | string | null | 输入图片的Base64或`data:image/...;base64,...`；编辑/理解任务必填 |
 | `size` | string | `512x512` | 输出尺寸；256–1024且宽高是16的倍数 |
 | `thinking` | boolean | ThinkMorph为true | 是否生成thinking文本 |
-| `max_think_tokens` | integer | 512 | 16–4096 |
+| `max_output_tokens` | integer | 图片理解128，其他任务512 | 文字回答或thinking的token上限，16–4096 |
+| `max_think_tokens` | integer | 同上 | `max_output_tokens` 的兼容别名 |
 | `max_rounds` | integer | 1 | ThinkMorph图文交错轮数，1–4 |
 | `steps` | integer | 30 | 图像生成步数，10–100 |
 | `seed` | integer | 0 | 0表示随机；正数用于复现 |
@@ -138,8 +214,8 @@ result = requests.post(
         "task": "image-understanding",
         "prompt": "Describe the spatial relationships in this image.",
         "image": encoded,
-        "thinking": True,
-        "max_think_tokens": 1024,
+        "thinking": False,
+        "max_output_tokens": 128,
     },
     timeout=3600,
 ).json()
@@ -208,7 +284,7 @@ GET /health
 curl "${DELTA_LLM_BASE_URL%/v1}/health"
 ```
 
-它不要求key，只返回Gateway和Worker状态，不返回模型输出或凭据。
+它不要求key，只返回Gateway、各模型副本、显存常驻状态、队列指标和最近一次推理耗时，不返回模型输出或凭据。正常的高性能worker应显示 `load_mode: resident` 且 `offloaded_modules: []`。
 
 ## 错误码
 
@@ -216,7 +292,8 @@ curl "${DELTA_LLM_BASE_URL%/v1}/health"
 |---:|---|
 | 400 | model、task、尺寸或输入图片不合法 |
 | 401 | API key缺失或错误 |
+| 404 | 异步任务不存在或结果已过期 |
 | 503 | 对应模型Worker不可用 |
 | 507 | GPU显存不足；降低尺寸、轮数、tokens或并发 |
 
-生成图片可能需要数十秒到数分钟。客户端读取超时建议至少设置为3600秒；初版每个Worker并发为1，其他请求会排队。
+同步生成仍可能被公网代理超时截断，客户端自身设置3600秒并不能改变Cloudflare限制。生产和团队调用应使用 `/v1/jobs`。每个GPU worker一次执行一个任务；4卡模式通过每模型两个独立副本实现真实的双并发，而不是让多个线程争用同一份模型。

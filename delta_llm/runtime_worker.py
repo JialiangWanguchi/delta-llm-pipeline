@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import io
+import json
 import os
 import random
 import re
@@ -38,6 +39,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--offload-dir", required=True)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--max-memory-gib", type=int, default=42)
+    parser.add_argument(
+        "--load-mode",
+        choices=("resident", "auto"),
+        default="resident",
+        help="Keep all model weights on GPU, or allow Accelerate CPU/disk offload",
+    )
     return parser.parse_args()
 
 
@@ -85,6 +92,12 @@ class ModelRuntime:
         self.args = args
         self.model_name = args.model
         self.lock = threading.Lock()
+        self.metrics_lock = threading.Lock()
+        self.queued_requests = 0
+        self.active_requests = 0
+        self.completed_requests = 0
+        self.failed_requests = 0
+        self.last_inference_seconds: float | None = None
         self.started_at = int(time.time())
         self.inferencer = self._load()
 
@@ -121,6 +134,7 @@ class ModelRuntime:
         llm_config.qk_norm = True
         llm_config.tie_word_embeddings = False
         llm_config.layer_module = config_entry["layer_module"]
+        llm_config.use_cache = True
 
         vit_config = SiglipVisionConfig.from_json_file(checkpoint_dir / "vit_config.json")
         vit_config.rope = False
@@ -148,37 +162,80 @@ class ModelRuntime:
 
         tokenizer = Qwen2Tokenizer.from_pretrained(str(checkpoint_dir))
         tokenizer, new_token_ids, _ = add_special_tokens(tokenizer)
-        max_memory = {
-            index: f"{self.args.max_memory_gib}GiB" for index in range(torch.cuda.device_count())
-        }
-        device_map = infer_auto_device_map(
-            model,
-            max_memory=max_memory,
-            no_split_module_classes=["Bagel", "Qwen2MoTDecoderLayer"],
-        )
-        same_device_modules = [
-            "language_model.model.embed_tokens",
-            "time_embedder",
-            "latent_pos_embed",
-            "vae2llm",
-            "llm2vae",
-            "connector",
-            "vit_pos_embed",
-        ]
-        first_device = device_map.get(same_device_modules[0], "cuda:0")
-        for key in same_device_modules:
-            if key in device_map or torch.cuda.device_count() == 1:
-                device_map[key] = first_device
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is required for the multimodal worker")
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
 
-        model = load_checkpoint_and_dispatch(
-            model,
-            checkpoint=str(checkpoint_dir / config_entry["checkpoint"]),
-            device_map=device_map,
-            offload_buffers=True,
-            offload_folder=str(offload_dir),
-            dtype=torch.bfloat16,
-            force_hooks=True,
-        ).eval()
+        if self.args.load_mode == "resident":
+            # Both checkpoints are ~29.2 GB. A Delta A100 40 GB can hold one
+            # complete BF16 model, and avoiding Accelerate's disk hooks removes
+            # the dominant per-token NVMe transfer cost.
+            device_map: dict[str, Any] = {"": 0}
+            model = load_checkpoint_and_dispatch(
+                model,
+                checkpoint=str(checkpoint_dir / config_entry["checkpoint"]),
+                device_map=device_map,
+                dtype=torch.bfloat16,
+                force_hooks=False,
+            ).eval()
+        else:
+            max_memory = {
+                index: f"{self.args.max_memory_gib}GiB"
+                for index in range(torch.cuda.device_count())
+            }
+            device_map = infer_auto_device_map(
+                model,
+                max_memory=max_memory,
+                no_split_module_classes=["Bagel", "Qwen2MoTDecoderLayer"],
+            )
+            same_device_modules = [
+                "language_model.model.embed_tokens",
+                "time_embedder",
+                "latent_pos_embed",
+                "vae2llm",
+                "llm2vae",
+                "connector",
+                "vit_pos_embed",
+            ]
+            first_device = device_map.get(same_device_modules[0], "cuda:0")
+            for key in same_device_modules:
+                if key in device_map or torch.cuda.device_count() == 1:
+                    device_map[key] = first_device
+            model = load_checkpoint_and_dispatch(
+                model,
+                checkpoint=str(checkpoint_dir / config_entry["checkpoint"]),
+                device_map=device_map,
+                offload_buffers=True,
+                offload_folder=str(offload_dir),
+                dtype=torch.bfloat16,
+                force_hooks=True,
+            ).eval()
+
+        self.device_map = dict(getattr(model, "hf_device_map", device_map))
+        self.offloaded_modules = sorted(
+            name
+            for name, device in self.device_map.items()
+            if str(device).lower() in {"cpu", "disk"}
+        )
+        if self.args.load_mode == "resident" and self.offloaded_modules:
+            raise RuntimeError(
+                "resident load unexpectedly offloaded modules: "
+                + ", ".join(self.offloaded_modules[:10])
+            )
+        print(
+            "DELTA_RUNTIME_LAYOUT "
+            + json.dumps(
+                {
+                    "model": self.model_name,
+                    "load_mode": self.args.load_mode,
+                    "device_map": self.device_map,
+                    "offloaded_modules": self.offloaded_modules,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
         return InterleaveInferencer(
             model=model,
             vae_model=vae_model,
@@ -200,7 +257,12 @@ class ModelRuntime:
         if task in {"image-edit", "image-understanding"} and input_image is None:
             raise ValueError(f"task {task} requires image")
         image_shape = parse_size(str(payload.get("size", "512x512")))
-        max_think_tokens = min(4096, max(16, int(payload.get("max_think_tokens", 512))))
+        default_output_tokens = 128 if task == "image-understanding" else 512
+        requested_output_tokens = payload.get(
+            "max_output_tokens",
+            payload.get("max_think_tokens", default_output_tokens),
+        )
+        max_think_tokens = min(4096, max(16, int(requested_output_tokens)))
         max_rounds = min(4, max(1, int(payload.get("max_rounds", 1))))
         steps = min(100, max(10, int(payload.get("steps", 30))))
         thinking = bool(payload.get("thinking", self.model_name == "thinkmorph-7b"))
@@ -224,8 +286,27 @@ class ModelRuntime:
         if self.model_name == "thinkmorph-7b":
             kwargs["max_rounds"] = max_rounds
 
-        with self.lock, torch.inference_mode():
-            result = self.inferencer(image=input_image, text=prompt, **kwargs)
+        with self.metrics_lock:
+            self.queued_requests += 1
+        started = time.perf_counter()
+        try:
+            with self.lock:
+                with self.metrics_lock:
+                    self.queued_requests -= 1
+                    self.active_requests = 1
+                with torch.inference_mode():
+                    result = self.inferencer(image=input_image, text=prompt, **kwargs)
+            with self.metrics_lock:
+                self.completed_requests += 1
+        except Exception:
+            with self.metrics_lock:
+                self.failed_requests += 1
+            raise
+        finally:
+            elapsed = time.perf_counter() - started
+            with self.metrics_lock:
+                self.active_requests = 0
+                self.last_inference_seconds = elapsed
 
         images: list[str] = []
         text_parts: list[str] = []
@@ -254,11 +335,34 @@ def create_app(runtime: ModelRuntime) -> FastAPI:
 
     @app.get("/health")
     def health() -> dict[str, Any]:
+        cuda: dict[str, Any] = {}
+        if torch.cuda.is_available():
+            device = torch.cuda.current_device()
+            cuda = {
+                "name": torch.cuda.get_device_name(device),
+                "memory_allocated_gib": round(torch.cuda.memory_allocated(device) / 2**30, 2),
+                "memory_reserved_gib": round(torch.cuda.memory_reserved(device) / 2**30, 2),
+                "memory_total_gib": round(
+                    torch.cuda.get_device_properties(device).total_memory / 2**30, 2
+                ),
+            }
+        with runtime.metrics_lock:
+            requests_state = {
+                "queued": runtime.queued_requests,
+                "active": runtime.active_requests,
+                "completed": runtime.completed_requests,
+                "failed": runtime.failed_requests,
+                "last_inference_seconds": runtime.last_inference_seconds,
+            }
         return {
             "status": "ok",
             "model": runtime.model_name,
             "cuda_devices": torch.cuda.device_count(),
             "started_at": runtime.started_at,
+            "load_mode": runtime.args.load_mode,
+            "offloaded_modules": runtime.offloaded_modules,
+            "cuda": cuda,
+            "requests": requests_state,
         }
 
     @app.post("/generate")

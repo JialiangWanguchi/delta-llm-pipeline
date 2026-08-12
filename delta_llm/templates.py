@@ -58,7 +58,7 @@ def render_deploy_script(config: Config, params: DeployParams) -> str:
     offload_root = f"{config.work_root}/{params.username}/delta-llm/offload/{params.deployment_id}"
     legacy_env_dir = f"{config.shared_root}/envs/{env_name}"
     slurm_time = hours_to_slurm(params.hours)
-    thinkmorph_gpu_count = 1 if params.gpu_count == 2 else 2
+    replicas_per_model = params.gpu_count // 2
     service_cpus = 32 if params.gpu_count == 2 else 48
     service_memory = "120g" if params.gpu_count == 2 else "220g"
     named_url = config.named_public_url if params.exposure == "cloudflare-named" else ""
@@ -312,7 +312,7 @@ DEPLOYMENT_ID=$DEPLOY_ID
 MODELS=bagel-7b,thinkmorph-7b
 GPU_PARTITION=gpuA100x4
 GPU_COUNT=$GPU_COUNT
-GPU_LAYOUT=bagel-7b:1,thinkmorph-7b:{thinkmorph_gpu_count}
+GPU_LAYOUT=bagel-7b:{replicas_per_model}-replicas,thinkmorph-7b:{replicas_per_model}-replicas
 EXPOSURE=$EXPOSURE
 METADATA
 chmod 600 "$DEPLOY_DIR/metadata.env"
@@ -370,41 +370,65 @@ if [[ "${{#CUDA_IDS[@]}}" -lt "$GPU_COUNT" ]]; then
   echo "Expected at least $GPU_COUNT allocated GPUs, got $ALLOCATED_CUDA" >&2
   exit 30
 fi
-BAGEL_CUDA="${{CUDA_IDS[0]}}"
-if (( GPU_COUNT >= 3 )); then
-  THINKMORPH_CUDA="${{CUDA_IDS[1]}},${{CUDA_IDS[2]}}"
-else
-  THINKMORPH_CUDA="${{CUDA_IDS[1]}}"
-fi
+REPLICAS_PER_MODEL=$((GPU_COUNT / 2))
+(( REPLICAS_PER_MODEL >= 1 )) || {{ echo FAILED > "$DEPLOY_DIR/state"; exit 30; }}
 
 # Compute nodes can be shared by multiple jobs. Derive distinct loopback ports
 # from the Slurm job ID instead of assuming the conventional 8000/810x ports
 # are free on the whole node.
 PORT_BASE=$((20000 + SLURM_JOB_ID % 30000))
-BAGEL_PORT=$PORT_BASE
-THINKMORPH_PORT=$((PORT_BASE + 1))
-GATEWAY_PORT=$((PORT_BASE + 2))
-export BAGEL_WORKER_URL="http://127.0.0.1:$BAGEL_PORT"
-export THINKMORPH_WORKER_URL="http://127.0.0.1:$THINKMORPH_PORT"
+GATEWAY_PORT=$((PORT_BASE + GPU_COUNT))
 export GATEWAY_PORT
-printf 'BAGEL_PORT=%s\nTHINKMORPH_PORT=%s\nGATEWAY_PORT=%s\n' \
-  "$BAGEL_PORT" "$THINKMORPH_PORT" "$GATEWAY_PORT" > "$DEPLOY_DIR/ports.env"
+BAGEL_URLS=()
+THINKMORPH_URLS=()
+WORKER_NAMES=()
+WORKER_PORTS=()
+WORKER_PIDS=()
+WORKER_LOGS=()
+: > "$DEPLOY_DIR/ports.env"
 
-CUDA_VISIBLE_DEVICES="$BAGEL_CUDA" "$ENV_DIR/bin/python" \
-  "$DEPLOY_DIR/runtime/worker.py" --model bagel-7b \
-  --repo-dir "$BAGEL_REPO" --checkpoint-dir "$BAGEL_MODEL" \
-  --offload-dir "$OFFLOAD_ROOT/bagel" --max-memory-gib 36 --port "$BAGEL_PORT" \
-  > "$DEPLOY_DIR/logs/bagel.log" 2>&1 &
-BAGEL_PID=$!
-PIDS+=("$BAGEL_PID")
+for ((replica=0; replica<REPLICAS_PER_MODEL; replica++)); do
+  BAGEL_CUDA="${{CUDA_IDS[$replica]}}"
+  THINKMORPH_INDEX=$((replica + REPLICAS_PER_MODEL))
+  THINKMORPH_CUDA="${{CUDA_IDS[$THINKMORPH_INDEX]}}"
+  BAGEL_PORT=$((PORT_BASE + replica))
+  THINKMORPH_PORT=$((PORT_BASE + REPLICAS_PER_MODEL + replica))
+  BAGEL_LOG="$DEPLOY_DIR/logs/bagel_${{replica}}.log"
+  THINKMORPH_LOG="$DEPLOY_DIR/logs/thinkmorph_${{replica}}.log"
 
-CUDA_VISIBLE_DEVICES="$THINKMORPH_CUDA" "$ENV_DIR/bin/python" \
-  "$DEPLOY_DIR/runtime/worker.py" --model thinkmorph-7b \
-  --repo-dir "$THINKMORPH_REPO" --checkpoint-dir "$THINKMORPH_MODEL" \
-  --offload-dir "$OFFLOAD_ROOT/thinkmorph" --max-memory-gib 36 --port "$THINKMORPH_PORT" \
-  > "$DEPLOY_DIR/logs/thinkmorph.log" 2>&1 &
-THINKMORPH_PID=$!
-PIDS+=("$THINKMORPH_PID")
+  CUDA_VISIBLE_DEVICES="$BAGEL_CUDA" "$ENV_DIR/bin/python" \
+    "$DEPLOY_DIR/runtime/worker.py" --model bagel-7b \
+    --repo-dir "$BAGEL_REPO" --checkpoint-dir "$BAGEL_MODEL" \
+    --offload-dir "$OFFLOAD_ROOT/bagel_${{replica}}" --load-mode resident \
+    --max-memory-gib 38 --port "$BAGEL_PORT" > "$BAGEL_LOG" 2>&1 &
+  BAGEL_PID=$!
+  PIDS+=("$BAGEL_PID")
+  BAGEL_URLS+=("http://127.0.0.1:$BAGEL_PORT")
+  WORKER_NAMES+=("bagel-${{replica}}")
+  WORKER_PORTS+=("$BAGEL_PORT")
+  WORKER_PIDS+=("$BAGEL_PID")
+  WORKER_LOGS+=("$BAGEL_LOG")
+
+  CUDA_VISIBLE_DEVICES="$THINKMORPH_CUDA" "$ENV_DIR/bin/python" \
+    "$DEPLOY_DIR/runtime/worker.py" --model thinkmorph-7b \
+    --repo-dir "$THINKMORPH_REPO" --checkpoint-dir "$THINKMORPH_MODEL" \
+    --offload-dir "$OFFLOAD_ROOT/thinkmorph_${{replica}}" --load-mode resident \
+    --max-memory-gib 38 --port "$THINKMORPH_PORT" > "$THINKMORPH_LOG" 2>&1 &
+  THINKMORPH_PID=$!
+  PIDS+=("$THINKMORPH_PID")
+  THINKMORPH_URLS+=("http://127.0.0.1:$THINKMORPH_PORT")
+  WORKER_NAMES+=("thinkmorph-${{replica}}")
+  WORKER_PORTS+=("$THINKMORPH_PORT")
+  WORKER_PIDS+=("$THINKMORPH_PID")
+  WORKER_LOGS+=("$THINKMORPH_LOG")
+
+  printf 'BAGEL_%s_PORT=%s\nTHINKMORPH_%s_PORT=%s\n' \
+    "$replica" "$BAGEL_PORT" "$replica" "$THINKMORPH_PORT" \
+    >> "$DEPLOY_DIR/ports.env"
+done
+printf 'GATEWAY_PORT=%s\n' "$GATEWAY_PORT" >> "$DEPLOY_DIR/ports.env"
+export BAGEL_WORKER_URLS="$(IFS=,; echo "${{BAGEL_URLS[*]}}")"
+export THINKMORPH_WORKER_URLS="$(IFS=,; echo "${{THINKMORPH_URLS[*]}}")"
 
 wait_for_worker() {{
   local name="$1" port="$2" pid="$3" log="$4"
@@ -423,8 +447,10 @@ wait_for_worker() {{
   tail -n 200 "$log" >&2 || true
   return 1
 }}
-wait_for_worker bagel "$BAGEL_PORT" "$BAGEL_PID" "$DEPLOY_DIR/logs/bagel.log"
-wait_for_worker thinkmorph "$THINKMORPH_PORT" "$THINKMORPH_PID" "$DEPLOY_DIR/logs/thinkmorph.log"
+for index in "${{!WORKER_NAMES[@]}}"; do
+  wait_for_worker "${{WORKER_NAMES[$index]}}" "${{WORKER_PORTS[$index]}}" \
+    "${{WORKER_PIDS[$index]}}" "${{WORKER_LOGS[$index]}}"
+done
 
 "$ENV_DIR/bin/python" "$DEPLOY_DIR/runtime/gateway.py" \
   > "$DEPLOY_DIR/logs/gateway.log" 2>&1 &
@@ -516,8 +542,8 @@ for _ in $(seq 1 600); do
     FINAL="$(sacct -n -X -j "$JOB_ID" -o State | awk 'NF {{print $1; exit}}')"
     echo "ERROR: service job ended before ready: $FINAL" >&2
     tail -n 200 "$DEPLOY_DIR/logs/slurm_${{JOB_ID}}.err" 2>/dev/null || true
-    tail -n 120 "$DEPLOY_DIR/logs/bagel.log" 2>/dev/null || true
-    tail -n 120 "$DEPLOY_DIR/logs/thinkmorph.log" 2>/dev/null || true
+    tail -n 120 "$DEPLOY_DIR"/logs/bagel_*.log 2>/dev/null || true
+    tail -n 120 "$DEPLOY_DIR"/logs/thinkmorph_*.log 2>/dev/null || true
     exit 36
   fi
   squeue -h -j "$JOB_ID" -o '[delta-multimodal] service %T: %R' | head -n 1
@@ -553,10 +579,11 @@ def render_logs_script(config: Config, username: str, deployment_id: str, lines:
 set -euo pipefail
 DEPLOY_DIR={q(deploy_dir)}
 [[ -d "$DEPLOY_DIR" ]] || {{ echo "Deployment not found" >&2; exit 40; }}
-for name in bagel thinkmorph gateway cloudflared; do
-  file="$DEPLOY_DIR/logs/$name.log"
+for file in "$DEPLOY_DIR"/logs/bagel_*.log \
+  "$DEPLOY_DIR"/logs/thinkmorph_*.log \
+  "$DEPLOY_DIR"/logs/gateway.log "$DEPLOY_DIR"/logs/cloudflared.log; do
   [[ -f "$file" ]] || continue
-  echo "===== $name ====="
+  echo "===== ${{file##*/}} ====="
   tail -n {lines} "$file"
 done
 """

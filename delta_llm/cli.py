@@ -45,7 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("setup-status", help="Read shared installer job, files, and recent setup logs")
 
     deploy = sub.add_parser("deploy", help="Deploy both models through one SSH+Duo login")
-    deploy.add_argument("--gpus", type=int, choices=(2, 3, 4), default=2)
+    deploy.add_argument(
+        "--gpus",
+        type=int,
+        choices=(2, 4),
+        default=4,
+        help="2 = each model has one replica; 4 = each model has two replicas",
+    )
     deploy.add_argument("--hours", type=float, help="Wall time; maximum 48")
     deploy.add_argument("--exposure", choices=EXPOSURE_MODES)
     deploy.add_argument("--acknowledge-external-tunnel", action="store_true")
@@ -172,8 +178,8 @@ def run_deploy(args: argparse.Namespace, config: Config) -> int:
         "gpu": "a100",
         "gpu_count": params.gpu_count,
         "gpu_layout": {
-            "bagel-7b": [0],
-            "thinkmorph-7b": [1] if params.gpu_count == 2 else [1, 2],
+            "bagel-7b": list(range(params.gpu_count // 2)),
+            "thinkmorph-7b": list(range(params.gpu_count // 2, params.gpu_count)),
         },
         "api_key": params.api_key,
         "remote_dir": result.remote_dir,

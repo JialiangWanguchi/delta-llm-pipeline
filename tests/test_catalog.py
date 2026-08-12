@@ -10,7 +10,7 @@ def test_pipeline_contains_only_requested_models() -> None:
 def test_dual_model_gpu_layout() -> None:
     assert validate_gpu_count(1)[0] is False
     assert validate_gpu_count(2)[0] is True
-    assert validate_gpu_count(3)[0] is True
+    assert validate_gpu_count(3)[0] is False
     assert validate_gpu_count(4)[0] is True
     assert validate_gpu_count(5)[0] is False
 
