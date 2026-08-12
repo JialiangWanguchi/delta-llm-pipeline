@@ -147,6 +147,8 @@ Linux/macOS: ~/.delta-llm/deployments/DEPLOYMENT_ID.json
 
 图片理解建议从 `thinking=false`、`max_output_tokens=128` 开始。图像生成建议从 `512x512`、`steps=20` 开始。2×H200布局下每个模型有2个常驻副本，同模型可同时执行2项推理；更多请求由 `/v1/jobs` 排队且可查询位置。
 
+2026-08-12实测：同一张双猫图片、`thinking=false`、64-token上限下，BAGEL图片理解耗时2.882秒，ThinkMorph耗时1.852秒；四路并发（每模型两路）总墙钟3.668秒。不同问题、图片尺寸和输出长度会产生不同延迟。
+
 ## 暴露模式
 
 - `none`：只生成Delta内部地址，最安全。

@@ -53,3 +53,25 @@ long synchronous inference rather than a crashed Slurm job or tunnel.
 
 The health instrumentation is intentionally retained because it is also the
 deployment guardrail that proves the performance fix is active.
+
+## H200 validation results
+
+Deployment `bagel-thinkmorph-20260812-143301-db42` was validated on two NVIDIA
+H200 GPUs after applying the resident-input alignment fix (`bf308d3`). Both
+models received the same public-domain photograph of two cats.
+
+| Model | Async submit | Server inference | Output |
+|---|---:|---:|---|
+| BAGEL-7B | 0.698 s | 2.882 s | Correct text, no image |
+| ThinkMorph-7B | 1.532 s | 1.852 s | Correct text, no image |
+
+Four simultaneous requests (two per model) completed in 3.668 seconds of total
+client wall time. The four server inference durations were 0.563–0.816 seconds
+with short 32-token answers, proving that both replicas for each model execute
+concurrently.
+
+Final worker health showed all four replicas as `resident`, zero offloaded
+modules, approximately 27.5 GiB allocated per replica, and zero failed requests.
+This improves the previous image-understanding behavior from an HTTP 524 after
+about 126 seconds to successful text responses in under three seconds for the
+tested concise prompts.
