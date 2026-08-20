@@ -125,7 +125,8 @@ Content-Type: application/json
 | `model` | string | 必填 | `bagel-7b` 或 `thinkmorph-7b` |
 | `task` | string | `text-to-image` | `text-to-image`、`image-edit`、`image-understanding` |
 | `prompt` | string | 必填 | 指令或问题 |
-| `image` | string | null | 输入图片的Base64或`data:image/...;base64,...`；编辑/理解任务必填 |
+| `image` | string | null | 旧版单图字段：Base64或`data:image/...;base64,...`；不能和`images`同时使用 |
+| `images` | array[string] | null | 按顺序输入1–8张图片；每项为Base64或data URL；不能和`image`同时使用 |
 | `size` | string | `512x512` | 输出尺寸；256–1024且宽高是16的倍数 |
 | `thinking` | boolean | ThinkMorph为true | 是否生成thinking文本 |
 | `max_output_tokens` | integer | 图片理解128，其他任务512 | 文字回答或thinking的token上限，16–4096 |
@@ -222,6 +223,50 @@ result = requests.post(
 print(result["text"])
 ```
 
+### 多图片理解与比较
+
+`image-understanding`和`image-edit`均支持1–8张输入图。多图时使用`images`数组，模型会按数组顺序接收`Image 1`、`Image 2`等输入，因此提示词可以直接引用“第一张图”和“第二张图”。不要同时发送`image`和`images`。
+
+```python
+import base64
+import requests
+
+
+def encode(path):
+    with open(path, "rb") as file:
+        return base64.b64encode(file.read()).decode("ascii")
+
+
+job = requests.post(
+    f"{base_url}/jobs",
+    headers={"Authorization": f"Bearer {api_key}"},
+    json={
+        "model": "thinkmorph-7b",
+        "task": "image-understanding",
+        "prompt": "比较第一张图和第二张图，说明共同点和主要差异。",
+        "images": [encode("before.jpg"), encode("after.jpg")],
+        "thinking": False,
+        "max_output_tokens": 256,
+    },
+    timeout=30,
+)
+job.raise_for_status()
+print(job.json()["id"])
+```
+
+多参考图编辑同样使用`images`：
+
+```json
+{
+  "model": "bagel-7b",
+  "task": "image-edit",
+  "prompt": "保持第一张图的构图，采用第二张图的色彩风格。",
+  "images": ["<第一张图base64>", "<第二张图base64>"],
+  "size": "512x512",
+  "steps": 30
+}
+```
+
 统一响应：
 
 ```json
@@ -231,7 +276,8 @@ print(result["text"])
   "model": "thinkmorph-7b",
   "task": "text-to-image",
   "text": "optional thinking or answer",
-  "images": ["data:image/png;base64,..."]
+  "images": ["data:image/png;base64,..."],
+  "input_image_count": 2
 }
 ```
 

@@ -31,6 +31,7 @@ MODEL_CONFIG = {
     },
 }
 LOGGER = logging.getLogger("delta_llm.worker")
+MAX_INPUT_IMAGES = 8
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,6 +60,48 @@ def image_from_data(value: str | None) -> Image.Image | None:
         return Image.open(io.BytesIO(raw)).convert("RGB")
     except Exception as exc:
         raise ValueError("image must be a valid base64 string or data URL") from exc
+
+
+def images_from_payload(payload: dict[str, Any]) -> list[Image.Image]:
+    """Decode the legacy singular image or the ordered multi-image array."""
+    singular = payload.get("image")
+    plural_present = "images" in payload and payload.get("images") is not None
+    if singular and plural_present:
+        raise ValueError("use either image or images, not both")
+
+    if plural_present:
+        values = payload["images"]
+        if not isinstance(values, list):
+            raise ValueError("images must be an array of base64 strings or data URLs")
+        if len(values) > MAX_INPUT_IMAGES:
+            raise ValueError(f"images supports at most {MAX_INPUT_IMAGES} input images")
+    elif singular:
+        values = [singular]
+    else:
+        values = []
+
+    decoded: list[Image.Image] = []
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"images[{index}] must be a non-empty base64 string or data URL")
+        try:
+            image = image_from_data(value)
+        except ValueError as exc:
+            raise ValueError(f"images[{index}] must be a valid base64 string or data URL") from exc
+        assert image is not None
+        decoded.append(image)
+    return decoded
+
+
+def build_input_terms(images: list[Image.Image], prompt: str) -> list[str | Image.Image]:
+    """Build an ordered image/text sequence understood by both official inferencers."""
+    terms: list[str | Image.Image] = []
+    for index, image in enumerate(images, start=1):
+        if len(images) > 1:
+            terms.append(f"Image {index}:")
+        terms.append(image)
+    terms.append(prompt)
+    return terms
 
 
 def image_to_data_url(image: Image.Image) -> str:
@@ -263,9 +306,9 @@ class ModelRuntime:
         prompt = str(payload.get("prompt", "")).strip()
         if not prompt:
             raise ValueError("prompt is required")
-        input_image = image_from_data(payload.get("image"))
-        if task in {"image-edit", "image-understanding"} and input_image is None:
-            raise ValueError(f"task {task} requires image")
+        input_images = images_from_payload(payload)
+        if task in {"image-edit", "image-understanding"} and not input_images:
+            raise ValueError(f"task {task} requires image or images")
         image_shape = parse_size(str(payload.get("size", "512x512")))
         default_output_tokens = 128 if task == "image-understanding" else 512
         requested_output_tokens = payload.get(
@@ -305,7 +348,10 @@ class ModelRuntime:
                     self.queued_requests -= 1
                     self.active_requests = 1
                 with torch.inference_mode():
-                    result = self.inferencer(image=input_image, text=prompt, **kwargs)
+                    result = self.inferencer.interleave_inference(
+                        build_input_terms(input_images, prompt),
+                        **kwargs,
+                    )
             with self.metrics_lock:
                 self.completed_requests += 1
         except Exception:
@@ -337,6 +383,7 @@ class ModelRuntime:
             "task": task,
             "text": "\n".join(text_parts) or None,
             "images": images,
+            "input_image_count": len(input_images),
         }
 
 

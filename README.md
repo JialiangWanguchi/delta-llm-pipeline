@@ -18,6 +18,7 @@ FastAPI Gateway :8000
 - 固定申请：2× NVIDIA H200 141GB
 - BAGEL：2个常驻显存副本，共享H200-0
 - ThinkMorph：2个常驻显存副本，共享H200-1
+- 输入：兼容单图`image`和最多8张的有序多图`images`数组
 - 默认时长：47.5小时；Delta上限48小时
 - 计费估算：2 × 3.0 × 47.5 = 285 weighted GPU-hours
 - 权重：约59.2GB，源码和权重位于 `/projects/bhsz/delta-llm/shared`；Python环境和包缓存在 `/work/nvme/bhsz/delta-llm/shared`
