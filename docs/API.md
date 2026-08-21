@@ -109,7 +109,7 @@ result = result_response.json()
 print(result["text"], result["elapsed_seconds"])
 ```
 
-任务状态为 `queued`、`running`、`succeeded` 或 `failed`。结果保留2小时；2×H200部署在每张141GB卡上启动同一模型的两个独立副本，因此每个模型最多同时执行两个任务，其余请求按模型分别排队。
+任务状态为 `queued`、`running`、`succeeded` 或 `failed`。结果保留2小时；4×A100部署让每个模型的两个独立副本各自独占一张40GB GPU，因此每个模型最多同时执行两个任务，其余请求按模型分别排队。
 
 ### 同步接口（兼容旧客户端）
 
@@ -342,4 +342,4 @@ curl "${DELTA_LLM_BASE_URL%/v1}/health"
 | 503 | 对应模型Worker不可用 |
 | 507 | GPU显存不足；降低尺寸、轮数、tokens或并发 |
 
-同步生成仍可能被公网代理超时截断，客户端自身设置3600秒并不能改变Cloudflare限制。生产和团队调用应使用 `/v1/jobs`。每个worker一次执行一个任务；2×H200模式在每张大显存GPU上启动两个独立进程，实现每模型真实双并发。
+同步生成仍可能被公网代理超时截断，客户端自身设置3600秒并不能改变Cloudflare限制。生产和团队调用应使用 `/v1/jobs`。每个worker一次执行一个任务；4×A100模式让四个worker分别独占GPU，实现每模型真实双并发。

@@ -18,7 +18,7 @@ def make_params(exposure: str = "none") -> DeployParams:
         username="testuser",
         deployment_id="bagel-thinkmorph-20260807-120000-abcd",
         api_key="plain-secret-must-not-appear",
-        gpu_count=2,
+        gpu_count=4,
         hours=1,
         exposure=exposure,
         hf_token="hf-secret-must-not-appear",
@@ -41,14 +41,14 @@ def test_generated_dual_model_script_is_safe_and_valid(exposure: str) -> None:
     assert "plain-secret-must-not-appear" not in script
     assert "hf-secret-must-not-appear" not in script
     assert "named-secret" not in script
-    assert "#SBATCH --partition=gpuH200x8" in script
-    assert "#SBATCH --gpus-per-node=2" in script
+    assert "#SBATCH --partition=gpuA100x4" in script
+    assert "#SBATCH --gpus-per-node=4" in script
     assert "#SBATCH --cpus-per-task=48" in script
-    assert "#SBATCH --mem=240g" in script
+    assert "#SBATCH --mem=220g" in script
     assert "--model bagel-7b" in script
     assert "--model thinkmorph-7b" in script
-    assert 'BAGEL_CUDA="${CUDA_IDS[0]}"' in script
-    assert 'THINKMORPH_CUDA="${CUDA_IDS[1]}"' in script
+    assert 'BAGEL_CUDA="${CUDA_IDS[$replica]}"' in script
+    assert 'THINKMORPH_CUDA="${CUDA_IDS[$((REPLICAS_PER_MODEL + replica))]}"' in script
     assert script.count("--load-mode resident") == 2
     assert script.count("--max-memory-gib 38") == 2
     assert "PORT_BASE=$((20000 + SLURM_JOB_ID % 30000))" in script
@@ -98,11 +98,11 @@ def test_runtime_sources_are_embedded() -> None:
     assert 'base64 -d > "$DEPLOY_DIR/runtime/worker.py"' in script
 
 
-def test_two_h200_layout_runs_two_replicas_per_model() -> None:
+def test_four_a100_layout_runs_two_replicas_per_model() -> None:
     script = render_deploy_script(Config(), make_params())
-    assert "#SBATCH --gpus-per-node=2" in script
+    assert "#SBATCH --gpus-per-node=4" in script
     assert "#SBATCH --cpus-per-task=48" in script
-    assert "#SBATCH --mem=240g" in script
+    assert "#SBATCH --mem=220g" in script
     assert "GPU_LAYOUT=bagel-7b:2-replicas,thinkmorph-7b:2-replicas" in script
     assert "REPLICAS_PER_MODEL=2" in script
 

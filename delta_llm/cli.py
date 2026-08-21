@@ -41,16 +41,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--username", help="NCSA username (or NCSA_USERNAME env var)")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("models", help="Show the two bundled models and API capabilities")
-    sub.add_parser("doctor", help="Check Delta account, H200 queue, storage, and network")
+    sub.add_parser("doctor", help="Check Delta account, A100 queue, storage, and network")
     sub.add_parser("setup-status", help="Read shared installer job, files, and recent setup logs")
 
     deploy = sub.add_parser("deploy", help="Deploy both models through one SSH+Duo login")
     deploy.add_argument(
         "--gpus",
         type=int,
-        choices=(2,),
-        default=2,
-        help="Fixed at 2 H200 GPUs; each model gets two replicas on one 141 GB GPU",
+        choices=(4,),
+        default=4,
+        help="Fixed at 4 A100 GPUs; each model gets one replica on each of two 40 GB GPUs",
     )
     deploy.add_argument("--hours", type=float, help="Wall time; maximum 48")
     deploy.add_argument("--exposure", choices=EXPOSURE_MODES)
@@ -98,9 +98,9 @@ def print_catalog() -> None:
         print(f"{model.key}: {model.label}")
         print(f"  Hugging Face: {model.model_id}")
         print(f"  Checkpoint: ~{model.checkpoint_gb:g} GB")
-        print("  H200 replicas: 2 (sharing one 141 GB GPU)")
+        print("  A100 replicas: 2 (one replica per 40 GB GPU)")
         print(f"  Capabilities: {', '.join(model.capabilities)}\n")
-    print("Default layout: BAGEL GPU 0; ThinkMorph GPU 1; one gateway/key.")
+    print("Default layout: BAGEL GPU 0/1; ThinkMorph GPU 2/3; one gateway/key.")
 
 
 def collect_deploy_params(args: argparse.Namespace, config: Config, username: str) -> DeployParams:
@@ -146,8 +146,8 @@ def print_plan(params: DeployParams) -> None:
     print("\nDual-model deployment plan")
     print(f"  ID:          {params.deployment_id}")
     print("  Models:      bagel-7b, thinkmorph-7b")
-    print(f"  Partition:   {GPU_SPECS['h200'].partition}")
-    print(f"  GPUs:        {params.gpu_count} x {GPU_SPECS['h200'].label}")
+    print(f"  Partition:   {GPU_SPECS['a100'].partition}")
+    print(f"  GPUs:        {params.gpu_count} x {GPU_SPECS['a100'].label}")
     print(f"  Layout:      {layout}")
     print(f"  Duration:    {params.hours:g} hours")
     print(f"  Exposure:    {params.exposure}")
@@ -175,11 +175,11 @@ def run_deploy(args: argparse.Namespace, config: Config) -> int:
         "endpoint": result.endpoint,
         "expires_at": result.expires_at,
         "models": list(MODEL_SPECS),
-        "gpu": "h200",
+        "gpu": "a100",
         "gpu_count": params.gpu_count,
         "gpu_layout": {
-            "bagel-7b": [0, 0],
-            "thinkmorph-7b": [1, 1],
+            "bagel-7b": [0, 1],
+            "thinkmorph-7b": [2, 3],
         },
         "api_key": params.api_key,
         "remote_dir": result.remote_dir,

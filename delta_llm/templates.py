@@ -44,8 +44,10 @@ class DeployParams:
 def render_deploy_script(config: Config, params: DeployParams) -> str:
     user_root = f"{config.project_root}/{params.username}/delta-llm"
     deploy_dir = f"{user_root}/deployments/{params.deployment_id}"
+    # Reuse the existing A100/SM80 runtime when its exact dependency and source
+    # fingerprint matches. A missing or stale runtime is rebuilt on an A100.
     env_name = (
-        f"multimodal-h200-sm90-py{config.python_version}-torch{config.torch_version}-{config.cuda_wheel}"
+        f"multimodal-py{config.python_version}-torch{config.torch_version}-{config.cuda_wheel}"
     )
     env_dir = f"{config.runtime_root}/envs/{env_name}"
     source_root = f"{config.shared_root}/sources"
@@ -60,7 +62,7 @@ def render_deploy_script(config: Config, params: DeployParams) -> str:
     slurm_time = hours_to_slurm(params.hours)
     replicas_per_model = 2
     service_cpus = 48
-    service_memory = "240g"
+    service_memory = "220g"
     named_url = config.named_public_url if params.exposure == "cloudflare-named" else ""
     env_fingerprint = ";".join(
         (
@@ -71,7 +73,6 @@ def render_deploy_script(config: Config, params: DeployParams) -> str:
             f"cuda={config.cuda_wheel}",
             f"bagel={config.bagel_commit}",
             f"thinkmorph={config.thinkmorph_commit}",
-            "gpu=h200-sm90",
         )
     )
     worker_b64 = b64(runtime_source("runtime_worker.py"))
@@ -115,8 +116,8 @@ accounts | grep -F "$ACCOUNT" >/dev/null || {{
   echo "ERROR: account $ACCOUNT is not available to $USER" >&2
   exit 20
 }}
-sinfo -h -p gpuH200x8 -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' || {{
-  echo "ERROR: gpuH200x8 is unavailable" >&2
+sinfo -h -p gpuA100x4 -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' || {{
+  echo "ERROR: gpuA100x4 is unavailable" >&2
   exit 23
 }}
 mkdir -p "$USER_ROOT/deployments" "$DEPLOY_DIR/logs" "$DEPLOY_DIR/secrets" \
@@ -201,7 +202,7 @@ if ! env_ready; then
     cat > "$DEPLOY_DIR/setup.slurm" <<SETUP_SLURM
 #!/usr/bin/env bash
 #SBATCH --account={config.account}
-#SBATCH --partition=gpuH200x8
+#SBATCH --partition=gpuA100x4
 #SBATCH --job-name=delta-mm-setup
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -311,7 +312,7 @@ fi
 cat > "$DEPLOY_DIR/metadata.env" <<METADATA
 DEPLOYMENT_ID=$DEPLOY_ID
 MODELS=bagel-7b,thinkmorph-7b
-GPU_PARTITION=gpuH200x8
+GPU_PARTITION=gpuA100x4
 GPU_COUNT=$GPU_COUNT
 GPU_LAYOUT=bagel-7b:{replicas_per_model}-replicas,thinkmorph-7b:{replicas_per_model}-replicas
 EXPOSURE=$EXPOSURE
@@ -323,7 +324,7 @@ cat > "$DEPLOY_DIR/service.slurm" <<'SERVICE_HEADER'
 SERVICE_HEADER
 cat >> "$DEPLOY_DIR/service.slurm" <<SERVICE_CONFIG
 #SBATCH --account={config.account}
-#SBATCH --partition=gpuH200x8
+#SBATCH --partition=gpuA100x4
 #SBATCH --job-name=mm-{params.deployment_id[:20]}
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -364,7 +365,7 @@ cleanup() {{
 }}
 trap cleanup EXIT INT TERM
 
-ALLOCATED_CUDA="${{CUDA_VISIBLE_DEVICES:-0,1}}"
+ALLOCATED_CUDA="${{CUDA_VISIBLE_DEVICES:-0,1,2,3}}"
 IFS=',' read -r -a CUDA_IDS <<< "$ALLOCATED_CUDA"
 if [[ "${{#CUDA_IDS[@]}}" -lt "$GPU_COUNT" ]]; then
   echo FAILED > "$DEPLOY_DIR/state"
@@ -388,8 +389,8 @@ WORKER_LOGS=()
 : > "$DEPLOY_DIR/ports.env"
 
 for ((replica=0; replica<REPLICAS_PER_MODEL; replica++)); do
-  BAGEL_CUDA="${{CUDA_IDS[0]}}"
-  THINKMORPH_CUDA="${{CUDA_IDS[1]}}"
+  BAGEL_CUDA="${{CUDA_IDS[$replica]}}"
+  THINKMORPH_CUDA="${{CUDA_IDS[$((REPLICAS_PER_MODEL + replica))]}}"
   BAGEL_PORT=$((PORT_BASE + replica))
   THINKMORPH_PORT=$((PORT_BASE + REPLICAS_PER_MODEL + replica))
   BAGEL_LOG="$DEPLOY_DIR/logs/bagel_${{replica}}.log"
@@ -627,8 +628,8 @@ def render_doctor_script(config: Config) -> str:
 set -euo pipefail
 echo '=== ACCOUNT ==='
 accounts
-echo '=== H200 PARTITION ==='
-sinfo -p gpuH200x8 -o '%P %a %l %D %t %G'
+echo '=== A100 PARTITION ==='
+sinfo -p gpuA100x4 -o '%P %a %l %D %t %G'
 echo '=== STORAGE ==='
 quota 2>/dev/null || true
 echo '=== OUTBOUND ==='

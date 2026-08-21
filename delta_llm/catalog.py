@@ -72,10 +72,10 @@ GPU_SPECS: dict[str, GPUSpec] = {
 
 
 def validate_gpu_count(gpu_count: int) -> tuple[bool, str]:
-    if gpu_count != 2:
-        return False, "双模型服务固定使用 2 张 H200"
-    return True, "H200-0: BAGEL 2个副本；H200-1: ThinkMorph 2个副本"
+    if gpu_count != 4:
+        return False, "双模型服务固定使用 4 张 A100"
+    return True, "A100-0/1: BAGEL 各1个副本；A100-2/3: ThinkMorph 各1个副本"
 
 
 def estimate_weighted_gpu_hours(gpu_count: int, hours: float) -> float:
-    return gpu_count * hours * GPU_SPECS["h200"].charge_factor
+    return gpu_count * hours * GPU_SPECS["a100"].charge_factor
