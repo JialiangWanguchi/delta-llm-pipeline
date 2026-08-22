@@ -19,6 +19,13 @@ from pathlib import Path
 from typing import Any
 
 MODELS = ("bagel-7b", "thinkmorph-7b")
+IMAGE_MEDIA_TYPES = {
+    ".gif": "image/gif",
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
 
 
 def normalize_base_url(value: str) -> str:
@@ -33,7 +40,9 @@ def normalize_base_url(value: str) -> str:
 def image_data_url(path: Path) -> str:
     if not path.is_file():
         raise ValueError(f"image does not exist: {path}")
-    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    media_type = mimetypes.guess_type(path.name)[0] or IMAGE_MEDIA_TYPES.get(
+        path.suffix.lower(), "application/octet-stream"
+    )
     if not media_type.startswith("image/"):
         raise ValueError(f"file does not look like an image: {path}")
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")

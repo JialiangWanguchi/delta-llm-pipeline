@@ -7,6 +7,15 @@ def test_normalize_base_url() -> None:
     assert verify_multi_image.normalize_base_url("https://example.test") == (
         "https://example.test/v1"
     )
+
+
+def test_webp_is_supported_when_windows_mimetypes_does_not_know_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    image = tmp_path / "frame.webp"
+    image.write_bytes(b"webp-test-data")
+    monkeypatch.setattr(verify_multi_image.mimetypes, "guess_type", lambda _: (None, None))
+    assert verify_multi_image.image_data_url(image).startswith("data:image/webp;base64,")
     assert verify_multi_image.normalize_base_url("https://example.test/v1/") == (
         "https://example.test/v1"
     )
