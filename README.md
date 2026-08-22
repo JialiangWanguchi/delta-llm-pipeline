@@ -2,6 +2,8 @@
 
 在 NCSA Delta 上一次部署 `BAGEL-7B-MoT` 和 `ThinkMorph-7B`，生成一个公网 Base URL 和一个共享 API key。客户端通过请求中的 `model` 字段选择模型，无需分别登录或维护两个接口。
 
+如果多位组员希望分别使用自己的NCSA账号提交作业，请直接使用[小组并行排队与交接说明](docs/TEAM_QUEUE.md)。其中包含长队列使用的`--detach`流程、胜出作业验收、其余作业取消，以及可直接运行的双模型多图片测试脚本。
+
 ```text
 Internet client
      │  one HTTPS URL + one Bearer key
@@ -106,6 +108,16 @@ for model in ("bagel-7b", "thinkmorph-7b"):
 ```
 
 完整请求字段、图片编辑、图片理解、响应格式和错误码见 [API文档](docs/API.md)。
+
+要验证两个模型都真正接收了2–8张有序输入图，可运行：
+
+```powershell
+$env:DELTA_LLM_BASE_URL = "https://YOUR-TUNNEL.trycloudflare.com/v1"
+$env:DELTA_LLM_API_KEY = "sk-delta-mm-YOUR-KEY"
+python .\examples\verify_multi_image.py --image .\first.jpg --image .\second.jpg
+```
+
+脚本对两个模型使用异步接口，并检查每个结果的`input_image_count`和非空文字回答；完整说明见[小组文档](docs/TEAM_QUEUE.md#3-第一个-ready-的成员完成多图验收)。
 
 ## 常用命令
 

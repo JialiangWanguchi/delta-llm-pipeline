@@ -188,7 +188,10 @@ def run_deploy(args: argparse.Namespace, config: Config) -> int:
         result.deployment_id,
         json.dumps(state, ensure_ascii=False, indent=2) + "\n",
     )
-    print("\nDual-model API created")
+    if result.state == "SUBMITTED":
+        print("\nDual-model deployment submitted")
+    else:
+        print("\nDual-model API created")
     print(f"  Deployment: {result.deployment_id}")
     print(f"  Job:        {result.job_id}")
     print(f"  State:      {result.state}")
@@ -197,6 +200,8 @@ def run_deploy(args: argparse.Namespace, config: Config) -> int:
     print(f"  Models:     {', '.join(MODEL_SPECS)}")
     print(f"  Expires:    {result.expires_at}")
     print(f"  Local state: {state_path}")
+    if result.state == "SUBMITTED":
+        print("  Next: run 'status DEPLOYMENT_ID' later to retrieve the public URL.")
     return 0
 
 
