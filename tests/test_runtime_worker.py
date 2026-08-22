@@ -11,6 +11,7 @@ from delta_llm.runtime_worker import (
     image_from_data,
     image_to_data_url,
     images_from_payload,
+    input_terms_from_payload,
     parse_size,
 )
 
@@ -75,6 +76,68 @@ def test_multiple_image_validation() -> None:
             raise AssertionError(f"Expected invalid image payload: {payload.keys()}")
 
 
+def test_legacy_images_accept_exactly_twenty_four() -> None:
+    decoded = images_from_payload({"images": [encoded_image("black")] * 24})
+    assert len(decoded) == MAX_INPUT_IMAGES == 24
+
+
+def test_interleaved_content_preserves_exact_text_image_order() -> None:
+    terms, images, types = input_terms_from_payload(
+        {
+            "content": [
+                {"type": "text", "text": "before frame one"},
+                {"type": "image", "image": encoded_image("red")},
+                {"type": "text", "text": "between the frames"},
+                {"type": "image", "image": encoded_image("blue")},
+                {"type": "text", "text": "compare them"},
+            ]
+        }
+    )
+    assert types == ["text", "image", "text", "image", "text"]
+    assert terms[0] == "before frame one"
+    assert isinstance(terms[1], Image.Image)
+    assert terms[2] == "between the frames"
+    assert isinstance(terms[3], Image.Image)
+    assert terms[4] == "compare them"
+    assert len(images) == 2
+
+
+def test_interleaved_content_accepts_twenty_four_images() -> None:
+    content = []
+    for index in range(24):
+        content.extend(
+            [
+                {"type": "text", "text": f"Frame {index + 1}"},
+                {"type": "image", "image": encoded_image("green")},
+            ]
+        )
+    content.append({"type": "text", "text": "Summarize all frames"})
+    terms, images, types = input_terms_from_payload({"content": content})
+    assert len(images) == 24
+    assert len(terms) == 49
+    assert types == ["text", "image"] * 24 + ["text"]
+
+
+def test_interleaved_content_validation() -> None:
+    valid = encoded_image("black")
+    invalid_payloads = [
+        {"prompt": "conflict", "content": [{"type": "text", "text": "x"}]},
+        {"images": [valid], "content": [{"type": "text", "text": "x"}]},
+        {"content": "not-an-array"},
+        {"content": []},
+        {"content": [{"type": "text", "text": ""}]},
+        {"content": [{"type": "image", "image": valid}]},
+        {"content": [{"type": "unknown", "text": "x"}]},
+    ]
+    for payload in invalid_payloads:
+        try:
+            input_terms_from_payload(payload)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"Expected invalid content payload: {payload}")
+
+
 def test_runtime_passes_multiple_images_to_official_interleave_api() -> None:
     class FakeInferencer:
         def __init__(self) -> None:
@@ -107,8 +170,52 @@ def test_runtime_passes_multiple_images_to_official_interleave_api() -> None:
     )
     assert result["text"] == "comparison complete"
     assert result["input_image_count"] == 2
+    assert result["input_content_types"] == ["text", "image", "text", "image", "text"]
     assert runtime.inferencer.terms[0] == "Image 1:"
     assert runtime.inferencer.terms[2] == "Image 2:"
+
+
+def test_runtime_passes_exact_interleaved_content_to_official_api() -> None:
+    class FakeInferencer:
+        def __init__(self) -> None:
+            self.terms = None
+
+        def interleave_inference(self, terms, **kwargs):
+            self.terms = terms
+            return ["ordered sequence received"]
+
+    runtime = ModelRuntime.__new__(ModelRuntime)
+    runtime.model_name = "thinkmorph-7b"
+    runtime.lock = threading.Lock()
+    runtime.metrics_lock = threading.Lock()
+    runtime.queued_requests = 0
+    runtime.active_requests = 0
+    runtime.completed_requests = 0
+    runtime.failed_requests = 0
+    runtime.last_inference_seconds = None
+    runtime.inferencer = FakeInferencer()
+    result = runtime.generate(
+        {
+            "task": "image-understanding",
+            "content": [
+                {"type": "text", "text": "first"},
+                {"type": "image", "image": encoded_image("red")},
+                {"type": "text", "text": "second"},
+                {"type": "image", "image": encoded_image("blue")},
+                {"type": "text", "text": "compare"},
+            ],
+            "thinking": False,
+            "max_output_tokens": 32,
+        }
+    )
+    assert result["text"] == "ordered sequence received"
+    assert result["input_image_count"] == 2
+    assert result["input_content_types"] == ["text", "image", "text", "image", "text"]
+    assert runtime.inferencer.terms[0] == "first"
+    assert isinstance(runtime.inferencer.terms[1], Image.Image)
+    assert runtime.inferencer.terms[2] == "second"
+    assert isinstance(runtime.inferencer.terms[3], Image.Image)
+    assert runtime.inferencer.terms[4] == "compare"
 
 
 def test_parse_size_validates_limits_and_alignment() -> None:

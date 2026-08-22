@@ -66,3 +66,50 @@ def test_verifier_submits_ordered_images_to_both_models(
     assert all(len(payload["images"]) == 2 for payload in submitted)
     assert all(payload["thinking"] is False for payload in submitted)
     assert capsys.readouterr().out.count("[PASS]") == 2
+
+
+def test_verifier_submits_exact_interleaved_content(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    first.write_bytes(b"first-image")
+    second.write_bytes(b"second-image")
+    submitted = []
+    expected_types = ["text", "image", "text", "image", "text"]
+
+    def fake_request(method, url, api_key, payload=None, timeout=30):
+        if url.endswith("/models"):
+            return {"data": [{"id": model} for model in verify_multi_image.MODELS]}
+        if method == "POST":
+            submitted.append(payload)
+            return {"id": f"job-{payload['model']}", "queue_position": 1}
+        if url.endswith("/result"):
+            return {
+                "text": "ordered content received",
+                "input_image_count": 2,
+                "input_content_types": expected_types,
+                "elapsed_seconds": 1.25,
+            }
+        return {"status": "succeeded", "elapsed_seconds": 1.25}
+
+    monkeypatch.setattr(verify_multi_image, "request_json", fake_request)
+    result = verify_multi_image.main(
+        [
+            "--base-url",
+            "https://example.test/v1",
+            "--api-key",
+            "secret",
+            "--image",
+            str(first),
+            "--image",
+            str(second),
+            "--interleaved",
+        ]
+    )
+    assert result == 0
+    for payload in submitted:
+        assert "images" not in payload
+        assert "prompt" not in payload
+        assert [item["type"] for item in payload["content"]] == expected_types
+    assert capsys.readouterr().out.count("[PASS]") == 2

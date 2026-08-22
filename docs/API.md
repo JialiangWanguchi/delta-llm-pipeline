@@ -126,7 +126,8 @@ Content-Type: application/json
 | `task` | string | `text-to-image` | `text-to-image`、`image-edit`、`image-understanding` |
 | `prompt` | string | 必填 | 指令或问题 |
 | `image` | string | null | 旧版单图字段：Base64或`data:image/...;base64,...`；不能和`images`同时使用 |
-| `images` | array[string] | null | 按顺序输入1–8张图片；每项为Base64或data URL；不能和`image`同时使用 |
+| `images` | array[string] | null | 旧式有序图片列表，输入1–24张；图片会集中放在prompt之前；不能和`image`或`content`同时使用 |
+| `content` | array[object] | null | 真正交替的文字/图片序列，最多64项、其中最多24张图片；使用时不能再发送`prompt`、`image`或`images` |
 | `size` | string | `512x512` | 输出尺寸；256–1024且宽高是16的倍数 |
 | `thinking` | boolean | ThinkMorph为true | 是否生成thinking文本 |
 | `max_output_tokens` | integer | 图片理解128，其他任务512 | 文字回答或thinking的token上限，16–4096 |
@@ -225,7 +226,7 @@ print(result["text"])
 
 ### 多图片理解与比较
 
-`image-understanding`和`image-edit`均支持1–8张输入图。多图时使用`images`数组，模型会按数组顺序接收`Image 1`、`Image 2`等输入，因此提示词可以直接引用“第一张图”和“第二张图”。不要同时发送`image`和`images`。
+`image-understanding`和`image-edit`均支持1–24张输入图。兼容模式使用`images`数组，模型会按数组顺序接收`Image 1`、`Image 2`等输入，随后接收`prompt`。不要同时发送`image`和`images`。
 
 ```python
 import base64
@@ -282,6 +283,74 @@ print(job.json()["id"])
 ```
 
 `images`可能包含多张图片，尤其是ThinkMorph多轮交错推理。客户端应遍历数组，不要只读取第一张。
+
+### 真正的文字/图片交替输入
+
+实验需要保留`文字 → 图片 → 文字 → 图片`顺序时，使用`content`，不要使用`images`。每个元素只能是：
+
+```json
+{"type": "text", "text": "非空文字"}
+```
+
+或：
+
+```json
+{"type": "image", "image": "data:image/jpeg;base64,..."}
+```
+
+完整的24图交替请求示意：
+
+```python
+import base64
+import requests
+
+
+def encode(path):
+    with open(path, "rb") as file:
+        return "data:image/jpeg;base64," + base64.b64encode(file.read()).decode()
+
+
+content = []
+for index in range(1, 25):
+    content.extend(
+        [
+            {"type": "text", "text": f"Frame {index} follows."},
+            {"type": "image", "image": encode(f"frame_{index:02d}.jpg")},
+        ]
+    )
+content.append(
+    {
+        "type": "text",
+        "text": "综合全部24帧，描述过程随时间发生的变化。只返回文字。",
+    }
+)
+
+job = requests.post(
+    f"{base_url}/jobs",
+    headers={"Authorization": f"Bearer {api_key}"},
+    json={
+        "model": "thinkmorph-7b",
+        "task": "image-understanding",
+        "content": content,
+        "thinking": False,
+        "max_output_tokens": 256,
+    },
+    timeout=30,
+)
+job.raise_for_status()
+print(job.json())
+```
+
+成功结果会同时返回：
+
+```json
+{
+  "input_image_count": 24,
+  "input_content_types": ["text", "image", "text", "image"]
+}
+```
+
+实际数组会完整包含49项：24组文字/图片，再加最后一条文字指令。该字段用于验证顺序没有在API层被重排。24张图片会显著增加KV cache和视觉编码开销；是否能在40GB A100上完成还取决于图片尺寸、文字长度和输出tokens，应先用低分辨率和较短输出测试。
 
 ## OpenAI Python SDK文生图兼容接口
 

@@ -31,7 +31,8 @@ MODEL_CONFIG = {
     },
 }
 LOGGER = logging.getLogger("delta_llm.worker")
-MAX_INPUT_IMAGES = 8
+MAX_INPUT_IMAGES = 24
+MAX_INPUT_CONTENT_ITEMS = 64
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,6 +103,71 @@ def build_input_terms(images: list[Image.Image], prompt: str) -> list[str | Imag
         terms.append(image)
     terms.append(prompt)
     return terms
+
+
+def input_terms_from_payload(
+    payload: dict[str, Any],
+) -> tuple[list[str | Image.Image], list[Image.Image], list[str]]:
+    """Build either a legacy image(s)+prompt request or an exact content sequence."""
+    content_present = "content" in payload and payload.get("content") is not None
+    if not content_present:
+        prompt = str(payload.get("prompt", "")).strip()
+        if not prompt:
+            raise ValueError("prompt is required")
+        images = images_from_payload(payload)
+        terms = build_input_terms(images, prompt)
+        types = ["image" if isinstance(term, Image.Image) else "text" for term in terms]
+        return terms, images, types
+
+    if payload.get("image") or payload.get("images") is not None:
+        raise ValueError("content cannot be combined with image or images")
+    if str(payload.get("prompt", "")).strip():
+        raise ValueError("content cannot be combined with prompt; put all text in content")
+    content = payload["content"]
+    if not isinstance(content, list) or not content:
+        raise ValueError("content must be a non-empty array")
+    if len(content) > MAX_INPUT_CONTENT_ITEMS:
+        raise ValueError(f"content supports at most {MAX_INPUT_CONTENT_ITEMS} items")
+
+    terms: list[str | Image.Image] = []
+    images: list[Image.Image] = []
+    types: list[str] = []
+    for index, item in enumerate(content):
+        if not isinstance(item, dict):
+            raise ValueError(  # noqa: TRY004 - request validation must remain HTTP 400
+                f"content[{index}] must be an object"
+            )
+        item_type = item.get("type")
+        if item_type == "text":
+            text = item.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError(f"content[{index}].text must be a non-empty string")
+            terms.append(text.strip())
+            types.append("text")
+        elif item_type == "image":
+            value = item.get("image")
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"content[{index}].image must be a non-empty base64 string or data URL"
+                )
+            try:
+                image = image_from_data(value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"content[{index}].image must be a valid base64 string or data URL"
+                ) from exc
+            assert image is not None
+            images.append(image)
+            if len(images) > MAX_INPUT_IMAGES:
+                raise ValueError(f"content supports at most {MAX_INPUT_IMAGES} input images")
+            terms.append(image)
+            types.append("image")
+        else:
+            raise ValueError(f"content[{index}].type must be 'text' or 'image'")
+
+    if "text" not in types:
+        raise ValueError("content must include at least one text item")
+    return terms, images, types
 
 
 def image_to_data_url(image: Image.Image) -> str:
@@ -303,12 +369,9 @@ class ModelRuntime:
         supported_tasks = {"text-to-image", "image-edit", "image-understanding"}
         if task not in supported_tasks:
             raise ValueError(f"unsupported task {task!r}; choose one of {sorted(supported_tasks)}")
-        prompt = str(payload.get("prompt", "")).strip()
-        if not prompt:
-            raise ValueError("prompt is required")
-        input_images = images_from_payload(payload)
+        input_terms, input_images, input_content_types = input_terms_from_payload(payload)
         if task in {"image-edit", "image-understanding"} and not input_images:
-            raise ValueError(f"task {task} requires image or images")
+            raise ValueError(f"task {task} requires image, images, or image content")
         image_shape = parse_size(str(payload.get("size", "512x512")))
         default_output_tokens = 128 if task == "image-understanding" else 512
         requested_output_tokens = payload.get(
@@ -349,7 +412,7 @@ class ModelRuntime:
                     self.active_requests = 1
                 with torch.inference_mode():
                     result = self.inferencer.interleave_inference(
-                        build_input_terms(input_images, prompt),
+                        input_terms,
                         **kwargs,
                     )
             with self.metrics_lock:
@@ -384,6 +447,7 @@ class ModelRuntime:
             "text": "\n".join(text_parts) or None,
             "images": images,
             "input_image_count": len(input_images),
+            "input_content_types": input_content_types,
         }
 
 

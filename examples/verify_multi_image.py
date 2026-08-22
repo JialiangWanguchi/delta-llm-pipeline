@@ -96,7 +96,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         required=True,
         type=Path,
-        help="Input image path in order; repeat 2 to 8 times",
+        help="Input image path in order; repeat 2 to 24 times",
+    )
+    parser.add_argument(
+        "--interleaved",
+        action="store_true",
+        help="Send exact text/image/text/image content instead of the legacy images array",
     )
     parser.add_argument(
         "--prompt",
@@ -113,8 +118,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if not 2 <= len(args.image) <= 8:
-        raise ValueError("repeat --image between 2 and 8 times")
+    if not 2 <= len(args.image) <= 24:
+        raise ValueError("repeat --image between 2 and 24 times")
     if not args.api_key:
         raise ValueError("set DELTA_LLM_API_KEY or pass --api-key")
     base_url = normalize_base_url(args.base_url)
@@ -127,6 +132,21 @@ def main(argv: list[str] | None = None) -> int:
 
     started = time.monotonic()
     pending: dict[str, str] = {}
+    if args.interleaved:
+        content: list[dict[str, str]] = []
+        for index, image in enumerate(images, start=1):
+            content.extend(
+                [
+                    {"type": "text", "text": f"Image {index} follows."},
+                    {"type": "image", "image": image},
+                ]
+            )
+        content.append({"type": "text", "text": args.prompt})
+        request_input = {"content": content}
+        expected_types = ["text", "image"] * len(images) + ["text"]
+    else:
+        request_input = {"prompt": args.prompt, "images": images}
+        expected_types = None
     for model in MODELS:
         job = request_json(
             "POST",
@@ -135,10 +155,9 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "model": model,
                 "task": "image-understanding",
-                "prompt": args.prompt,
-                "images": images,
                 "thinking": False,
                 "max_output_tokens": args.max_output_tokens,
+                **request_input,
             },
         )
         pending[model] = str(job["id"])
@@ -162,16 +181,18 @@ def main(argv: list[str] | None = None) -> int:
             )
             elapsed = result.get("elapsed_seconds", status.get("elapsed_seconds"))
             image_count = result.get("input_image_count")
+            content_types = result.get("input_content_types")
             text = str(result.get("text") or "").strip()
-            passed = image_count == len(images) and bool(text)
+            order_passed = expected_types is None or content_types == expected_types
+            passed = image_count == len(images) and bool(text) and order_passed
             verdict = "PASS" if passed else "FAIL"
             print(
                 f"\n[{verdict}] {model}: input_image_count={image_count}, "
-                f"elapsed={elapsed}s\n{text}\n"
+                f"elapsed={elapsed}s, input_content_types={content_types}\n{text}\n"
             )
             if not passed:
                 failures.append(
-                    f"{model}: expected {len(images)} inputs and non-empty text"
+                    f"{model}: expected {len(images)} inputs, exact order, and non-empty text"
                 )
             del pending[model]
         if pending:

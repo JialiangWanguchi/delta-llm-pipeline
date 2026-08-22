@@ -74,7 +74,8 @@ $env:DELTA_LLM_API_KEY = "sk-delta-mm-YOUR-KEY"
 
 python .\examples\verify_multi_image.py `
   --image .\first.jpg `
-  --image .\second.jpg
+  --image .\second.jpg `
+  --interleaved
 ```
 
 macOS/Linux：
@@ -85,7 +86,8 @@ export DELTA_LLM_API_KEY="sk-delta-mm-YOUR-KEY"
 
 python ./examples/verify_multi_image.py \
   --image ./first.jpg \
-  --image ./second.jpg
+  --image ./second.jpg \
+  --interleaved
 ```
 
 脚本会执行以下检查：
@@ -96,7 +98,7 @@ python ./examples/verify_multi_image.py \
 4. 要求两个结果都返回非空文字，并且 `input_image_count` 等于实际输入图片数；
 5. 任一模型失败时以非零退出码结束。
 
-可以重复 `--image` 2–8次。验收输出中的 `PASS` 是API确实接收全部图片的必要条件；还应人工检查文字回答是否正确区分了第一张、第二张等图片。
+可以重复 `--image` 2–24次。`--interleaved`要求API保留真正的文字/图片交替顺序。验收输出中的 `PASS` 会同时检查`input_image_count`和`input_content_types`；还应人工检查文字回答是否正确区分了第一张、第二张等图片。
 
 ## 4. 交接 URL/key，立即取消其余作业
 

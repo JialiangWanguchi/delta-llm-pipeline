@@ -20,7 +20,7 @@ FastAPI Gateway :8000
 - 固定申请：4× NVIDIA A100 40GB（完整节点）
 - BAGEL：2个常驻显存副本，分别独占A100-0和A100-1
 - ThinkMorph：2个常驻显存副本，分别独占A100-2和A100-3
-- 输入：兼容单图`image`和最多8张的有序多图`images`数组
+- 输入：兼容单图`image`、最多24张的`images`数组，以及真正文字/图片交替的`content`数组
 - 默认时长：47.5小时；Delta上限48小时
 - 计费估算：4 × 1.0 × 47.5 = 190 weighted GPU-hours
 - 权重：约59.2GB，源码和权重位于 `/projects/bhsz/delta-llm/shared`；Python环境和包缓存在 `/work/nvme/bhsz/delta-llm/shared`
@@ -109,15 +109,17 @@ for model in ("bagel-7b", "thinkmorph-7b"):
 
 完整请求字段、图片编辑、图片理解、响应格式和错误码见 [API文档](docs/API.md)。
 
-要验证两个模型都真正接收了2–8张有序输入图，可运行：
+要验证两个模型都真正接收了2–24张有序输入图，可运行：
 
 ```powershell
 $env:DELTA_LLM_BASE_URL = "https://YOUR-TUNNEL.trycloudflare.com/v1"
 $env:DELTA_LLM_API_KEY = "sk-delta-mm-YOUR-KEY"
-python .\examples\verify_multi_image.py --image .\first.jpg --image .\second.jpg
+python .\examples\verify_multi_image.py `
+  --image .\first.jpg --image .\second.jpg `
+  --interleaved
 ```
 
-脚本对两个模型使用异步接口，并检查每个结果的`input_image_count`和非空文字回答；完整说明见[小组文档](docs/TEAM_QUEUE.md#3-第一个-ready-的成员完成多图验收)。
+`--interleaved`会构造真正的`text → image → text → image → text`序列。脚本对两个模型使用异步接口，并检查每个结果的`input_image_count`、`input_content_types`和非空文字回答；完整说明见[小组文档](docs/TEAM_QUEUE.md#3-第一个-ready-的成员完成多图验收)。
 
 ## 常用命令
 
