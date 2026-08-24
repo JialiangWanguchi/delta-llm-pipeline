@@ -591,8 +591,8 @@ exit 37
 
 
 def render_split_deploy_script(config: Config, params: DeployParams) -> str:
-    if params.gpu_type != "h200" or params.gpu_count != 2:
-        raise ValueError("split deployment requires exactly 2×H200")
+    if (params.gpu_type, params.gpu_count) not in {("a100", 4), ("h200", 2)}:
+        raise ValueError("split deployment requires 4×A100 or 2×H200")
     user_root = f"{config.project_root}/{params.username}/delta-llm"
     deploy_dir = f"{user_root}/deployments/{params.deployment_id}"
     env_name = (
@@ -607,6 +607,20 @@ def render_split_deploy_script(config: Config, params: DeployParams) -> str:
     cloudflared = f"{config.shared_root}/bin/cloudflared"
     offload_root = f"{config.work_root}/{params.username}/delta-llm/offload/{params.deployment_id}"
     slurm_time = hours_to_slurm(params.hours)
+    if params.gpu_type == "a100":
+        partition = "gpuA100x4"
+        gpus_per_job = 2
+        cpus_per_job = 24
+        memory_per_job = "110g"
+        worker_max_memory = 38
+        gpu_layout = "split:bagel-2xa100,thinkmorph-2xa100"
+    else:
+        partition = "gpuH200x8"
+        gpus_per_job = 1
+        cpus_per_job = 12
+        memory_per_job = "240g"
+        worker_max_memory = 135
+        gpu_layout = "split:bagel-1xh200,thinkmorph-1xh200"
     named_url = config.named_public_url if params.exposure == "cloudflare-named" else ""
     worker_b64 = b64(runtime_source("runtime_worker.py"))
     gateway_b64 = b64(runtime_source("runtime_gateway.py"))
@@ -632,8 +646,8 @@ WORKER_KEY_B64={q(b64(params.worker_api_key))}
 CF_TOKEN_B64={q(b64(params.cf_tunnel_token))}
 
 accounts | grep -F "$ACCOUNT" >/dev/null || {{ echo "ERROR: account unavailable" >&2; exit 20; }}
-sinfo -h -p gpuH200x8 -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' || {{
-  echo "ERROR: gpuH200x8 is unavailable" >&2; exit 23;
+sinfo -h -p {partition} -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' || {{
+  echo "ERROR: {partition} is unavailable" >&2; exit 23;
 }}
 
 mkdir -p "$DEPLOY_DIR/logs" "$DEPLOY_DIR/secrets" "$DEPLOY_DIR/runtime" \
@@ -669,10 +683,10 @@ fi
 cat > "$DEPLOY_DIR/metadata.env" <<METADATA
 DEPLOYMENT_ID=$DEPLOY_ID
 MODELS=bagel-7b,thinkmorph-7b
-GPU_TYPE=h200
-GPU_PARTITION=gpuH200x8
-GPU_COUNT=2
-GPU_LAYOUT=split:bagel-1xh200,thinkmorph-1xh200
+GPU_TYPE={params.gpu_type}
+GPU_PARTITION={partition}
+GPU_COUNT={params.gpu_count}
+GPU_LAYOUT={gpu_layout}
 EXPOSURE=$EXPOSURE
 METADATA
 chmod 600 "$DEPLOY_DIR/metadata.env"
@@ -682,12 +696,12 @@ rm -f "$DEPLOY_DIR/endpoint" "$DEPLOY_DIR/registry"/*.env
 cat > "$DEPLOY_DIR/split_model.slurm" <<'SPLIT_JOB'
 #!/usr/bin/env bash
 #SBATCH --account={config.account}
-#SBATCH --partition=gpuH200x8
+#SBATCH --partition={partition}
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=12
-#SBATCH --gpus-per-node=1
-#SBATCH --mem=240g
+#SBATCH --cpus-per-task={cpus_per_job}
+#SBATCH --gpus-per-node={gpus_per_job}
+#SBATCH --mem={memory_per_job}
 #SBATCH --time={slurm_time}
 
 set -euo pipefail
@@ -729,7 +743,12 @@ trap cleanup EXIT INT TERM
 
 PORT_BASE=$((20000 + SLURM_JOB_ID % 30000))
 NODE_HOST="$(hostname -f)"
-GPU_ID="${{CUDA_VISIBLE_DEVICES%%,*}}"
+ALLOCATED_CUDA="${{CUDA_VISIBLE_DEVICES:-{','.join(str(i) for i in range(gpus_per_job))}}}"
+IFS=',' read -r -a CUDA_IDS <<< "$ALLOCATED_CUDA"
+[[ "${{#CUDA_IDS[@]}}" -ge {gpus_per_job} ]] || {{
+  echo "Expected {gpus_per_job} allocated GPUs, got $ALLOCATED_CUDA" >&2
+  exit 29
+}}
 URLS=()
 LOG_PREFIX="$ROLE"
 if [[ "$ROLE" == bagel ]]; then
@@ -741,11 +760,12 @@ fi
 for replica in 0 1; do
   PORT=$((PORT_BASE + replica))
   LOG="$DEPLOY_DIR/logs/${{LOG_PREFIX}}_${{replica}}.log"
+  if [[ {gpus_per_job} -eq 1 ]]; then GPU_ID="${{CUDA_IDS[0]}}"; else GPU_ID="${{CUDA_IDS[$replica]}}"; fi
   CUDA_VISIBLE_DEVICES="$GPU_ID" "$ENV_DIR/bin/python" \
     "$DEPLOY_DIR/runtime/worker.py" --model "$MODEL_NAME" --host 0.0.0.0 \
     --repo-dir "$REPO_DIR" --checkpoint-dir "$MODEL_DIR" \
     --offload-dir "$OFFLOAD_ROOT/${{ROLE}}_${{replica}}" --load-mode resident \
-    --max-memory-gib 135 --port "$PORT" > "$LOG" 2>&1 &
+    --max-memory-gib {worker_max_memory} --port "$PORT" > "$LOG" 2>&1 &
   PIDS+=("$!")
   URLS+=("http://$NODE_HOST:$PORT")
 done

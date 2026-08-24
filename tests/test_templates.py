@@ -158,6 +158,27 @@ def test_split_h200_layout_submits_two_authenticated_single_gpu_jobs() -> None:
         assert result.returncode == 0, result.stderr.decode(errors="replace")
 
 
+def test_split_a100_layout_submits_two_authenticated_dual_gpu_jobs() -> None:
+    params = replace(make_params(exposure="cloudflare-quick"), split_jobs=True)
+    script = render_split_deploy_script(Config(), params)
+    assert script.count("sbatch --parsable") == 2
+    assert "#SBATCH --partition=gpuA100x4" in script
+    assert "#SBATCH --gpus-per-node=2" in script
+    assert "#SBATCH --cpus-per-task=24" in script
+    assert "#SBATCH --mem=110g" in script
+    assert "GPU_TYPE=a100" in script
+    assert "GPU_COUNT=4" in script
+    assert "GPU_LAYOUT=split:bagel-2xa100,thinkmorph-2xa100" in script
+    assert 'GPU_ID="${CUDA_IDS[$replica]}"' in script
+    assert "--max-memory-gib 38" in script
+    bash = shutil.which("bash")
+    if bash:
+        result = subprocess.run(
+            [bash, "-n"], input=script.encode(), capture_output=True, check=False
+        )
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+
 def test_split_job_management_handles_comma_separated_job_ids() -> None:
     status = render_status_script(Config(), "testuser", "deployment")
     logs = render_logs_script(Config(), "testuser", "deployment", 50)

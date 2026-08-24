@@ -7,7 +7,7 @@
 ## 凭据处理
 
 - NCSA 密码与 Duo 响应只由 OpenSSH 客户端读取，Python 程序无法获得它们。
-- 共享 API key 用 Python `secrets` 生成，通过 SSH stdin 发送；远端保存在部署目录下的 `secrets/api_key`，权限 `0600`。默认拓扑中的 Worker 只监听回环地址；拆分H200拓扑需要通过Delta内部计算网络互联，并使用另一枚随机内部Bearer key保护Worker端点。两种拓扑都只通过统一Gateway暴露公网入口。
+- 共享 API key 用 Python `secrets` 生成，通过 SSH stdin 发送；远端保存在部署目录下的 `secrets/api_key`，权限 `0600`。默认拓扑中的 Worker 只监听回环地址；拆分拓扑需要通过Delta内部计算网络互联，并使用另一枚随机内部Bearer key保护Worker端点。两种拓扑都只通过统一Gateway暴露公网入口。
 - Hugging Face token 仅在需要 gated model 时从本地 `HF_TOKEN` 读取。本版本内置模型通常不需要它。
 - Named Tunnel token 从 `DELTA_LLM_CF_TUNNEL_TOKEN` 读取。不要写入 `config.toml`、README、Git history 或 Slurm 参数。
 - 本地状态位于 `~/.delta-llm/deployments`，包含 API key。共享电脑上应确认主目录权限，并在实验完成后删除不再需要的状态文件。

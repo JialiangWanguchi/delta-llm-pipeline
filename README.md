@@ -80,6 +80,16 @@ H200-0承载两个BAGEL副本，H200-1承载两个ThinkMorph副本；每张卡�
 
 该模式分别提交BAGEL和ThinkMorph单卡作业；两者都启动后仍只暴露一个HTTPS Base URL和一个外部API Key。`status`会显示两个Job ID。如果只有一个作业开始运行，整体状态不会变为`READY`，但已运行作业会开始消耗GPU-hours，因此应持续查看两个作业的状态。
 
+四张A100也可以拆成两个独立作业，每个模型申请两张A100并运行两个常驻副本：
+
+```powershell
+.\run.ps1 --username your_ncsa_username deploy `
+  --gpu-type a100 --gpus 4 --split-jobs --hours 47.5 `
+  --exposure cloudflare-quick --acknowledge-external-tunnel --detach
+```
+
+与H200拆分模式相同，两个A100作业通过内部Bearer认证互联，只有两个模型都健康后才创建统一公网入口。
+
 ## OpenAI兼容调用
 
 ```python

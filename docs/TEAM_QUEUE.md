@@ -38,6 +38,8 @@ cd delta-llm-pipeline
 
 双卡H200若因gang scheduling预计等待过久，可加`--gpu-type h200 --gpus 2 --split-jobs`，把两个模型分别提交为独立的单卡H200作业。输出中的`Job`会包含两个逗号分隔的Job ID；统一URL只有在两个作业都启动并通过健康检查后才会生成。拆分可能更早拿到单卡，但两个作业启动时间不同会造成部分GPU先计费而服务尚未完整可用。
 
+四卡A100可用`--gpu-type a100 --gpus 4 --split-jobs`拆成两个双卡作业：一个作业运行两个BAGEL副本，另一个作业运行两个ThinkMorph副本。统一URL、Job ID表示和健康门槛与H200拆分模式一致。
+
 本地状态文件位于：
 
 ```text

@@ -66,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument(
         "--split-jobs",
         action="store_true",
-        help="Submit BAGEL and ThinkMorph as independent 1-GPU H200 jobs",
+        help="Submit one independent job per model (2 A100s or 1 H200 each)",
     )
     deploy.add_argument(
         "--recover-stalled-setup",
@@ -119,8 +119,14 @@ def collect_deploy_params(args: argparse.Namespace, config: Config, username: st
     ok, reason = validate_gpu_layout(args.gpu_type, args.gpus)
     if not ok:
         raise ValueError(reason)
-    if args.split_jobs and (args.gpu_type != "h200" or args.gpus != 2):
-        raise ValueError("--split-jobs currently requires --gpu-type h200 --gpus 2")
+    if args.split_jobs and (args.gpu_type, args.gpus) not in {
+        ("a100", 4),
+        ("h200", 2),
+    }:
+        raise ValueError(
+            "--split-jobs requires either 4 A100s (2 per model job) "
+            "or 2 H200s (1 per model job)"
+        )
     hours = args.hours if args.hours is not None else config.default_hours
     if not 0 < hours <= 48:
         raise ValueError("Duration must be greater than 0 and no more than 48 hours")
@@ -169,7 +175,12 @@ def print_plan(params: DeployParams) -> None:
     print(f"  Partition:   {gpu_spec.partition}")
     print(f"  GPUs:        {params.gpu_count} x {gpu_spec.label}")
     print(f"  Layout:      {layout}")
-    print(f"  Scheduling:  {'two independent 1-GPU jobs' if params.split_jobs else 'one job'}")
+    if params.split_jobs:
+        per_job = 2 if params.gpu_type == "a100" else 1
+        scheduling = f"two independent {per_job}-GPU jobs"
+    else:
+        scheduling = "one job"
+    print(f"  Scheduling:  {scheduling}")
     print(f"  Duration:    {params.hours:g} hours")
     print(f"  Exposure:    {params.exposure}")
     print(f"  Cost guide:  ~{estimate:.2f} weighted GPU-hours")
