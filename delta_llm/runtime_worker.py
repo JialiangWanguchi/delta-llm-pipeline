@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import io
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -33,6 +35,14 @@ MODEL_CONFIG = {
 LOGGER = logging.getLogger("delta_llm.worker")
 MAX_INPUT_IMAGES = 24
 MAX_INPUT_CONTENT_ITEMS = 64
+MAX_IMAGE_BYTES = int(os.environ.get("MAX_IMAGE_BYTES", str(10 * 1024 * 1024)))
+MAX_IMAGE_PIXELS = int(os.environ.get("MAX_IMAGE_PIXELS", str(16_000_000)))
+EFFECTIVE_CONTEXT_LIMIT = int(os.environ.get("EFFECTIVE_CONTEXT_LIMIT", "28672"))
+VIT_MAX_IMAGE_SIZE = int(os.environ.get("VIT_MAX_IMAGE_SIZE", "336"))
+VIT_MIN_IMAGE_SIZE = int(os.environ.get("VIT_MIN_IMAGE_SIZE", "224"))
+VIT_PATCH_SIZE = 14
+VIT_MAX_PIXELS = 14 * 14 * 9 * 1024
+ALLOWED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,12 +65,93 @@ def parse_args() -> argparse.Namespace:
 def image_from_data(value: str | None) -> Image.Image | None:
     if not value:
         return None
-    encoded = value.split(",", 1)[1] if value.startswith("data:") else value
+    encoded = value
+    if value.startswith("data:"):
+        if "," not in value:
+            raise ValueError("image data URL is malformed")
+        header, encoded = value.split(",", 1)
+        mime_type = header[5:].split(";", 1)[0].lower()
+        if ";base64" not in header.lower() or mime_type not in ALLOWED_IMAGE_MIME_TYPES:
+            raise ValueError("image data URL must be base64 JPEG, PNG, or WebP")
+    if len(encoded) > math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 4:
+        raise ValueError(f"image exceeds the {MAX_IMAGE_BYTES}-byte limit")
     try:
         raw = base64.b64decode(encoded, validate=True)
-        return Image.open(io.BytesIO(raw)).convert("RGB")
-    except Exception as exc:
+        if len(raw) > MAX_IMAGE_BYTES:
+            raise ValueError(f"image exceeds the {MAX_IMAGE_BYTES}-byte limit")
+        with Image.open(io.BytesIO(raw)) as source:
+            if (source.format or "").upper() not in {"JPEG", "PNG", "WEBP"}:
+                raise ValueError("image format must be JPEG, PNG, or WebP")
+            width, height = source.size
+            if width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS:
+                raise ValueError(f"image exceeds the {MAX_IMAGE_PIXELS}-pixel limit")
+            source.load()
+            return source.convert("RGB")
+    except (binascii.Error, OSError) as exc:
         raise ValueError("image must be a valid base64 string or data URL") from exc
+
+
+def _make_divisible(value: float, stride: int) -> int:
+    return max(stride, int(round(value / stride) * stride))
+
+
+def vit_processed_size(width: int, height: int) -> tuple[int, int]:
+    """Mirror the pinned BAGEL ImageTransform resize math used by the worker."""
+    scale = min(VIT_MAX_IMAGE_SIZE / max(width, height), 1.0)
+    scale = max(scale, VIT_MIN_IMAGE_SIZE / min(width, height))
+    new_width = _make_divisible(round(width * scale), VIT_PATCH_SIZE)
+    new_height = _make_divisible(round(height * scale), VIT_PATCH_SIZE)
+    if new_width * new_height > VIT_MAX_PIXELS:
+        pixel_scale = VIT_MAX_PIXELS / (new_width * new_height)
+        new_width = _make_divisible(round(new_width * pixel_scale), VIT_PATCH_SIZE)
+        new_height = _make_divisible(round(new_height * pixel_scale), VIT_PATCH_SIZE)
+    if max(new_width, new_height) > VIT_MAX_IMAGE_SIZE:
+        edge_scale = VIT_MAX_IMAGE_SIZE / max(new_width, new_height)
+        new_width = _make_divisible(round(new_width * edge_scale), VIT_PATCH_SIZE)
+        new_height = _make_divisible(round(new_height * edge_scale), VIT_PATCH_SIZE)
+    return new_width, new_height
+
+
+def estimate_token_budget(
+    terms: list[str | Image.Image],
+    tokenizer: Any | None,
+    max_output_tokens: int,
+    thinking_prompt: str | None = None,
+) -> dict[str, Any]:
+    text_terms = [term for term in terms if isinstance(term, str)]
+    if thinking_prompt:
+        text_terms.insert(0, thinking_prompt)
+    text_tokens = 0
+    for text in text_terms:
+        encoded_length = len(tokenizer.encode(text)) if tokenizer is not None else math.ceil(len(text) / 4)
+        # BAGEL prepare_prompts adds BOS and EOS around every string term.
+        text_tokens += encoded_length + 2
+
+    dimensions: list[dict[str, int]] = []
+    visual_tokens_per_image: list[int] = []
+    for term in terms:
+        if not isinstance(term, Image.Image):
+            continue
+        width, height = vit_processed_size(*term.size)
+        visual_tokens = (width // VIT_PATCH_SIZE) * (height // VIT_PATCH_SIZE)
+        dimensions.append({"width": width, "height": height})
+        visual_tokens_per_image.append(visual_tokens)
+    visual_tokens = sum(visual_tokens_per_image)
+    image_special_tokens = len(visual_tokens_per_image) * 2
+    input_tokens = text_tokens + visual_tokens + image_special_tokens
+    required_tokens = input_tokens + max_output_tokens + 1
+    return {
+        "effective_context_limit": EFFECTIVE_CONTEXT_LIMIT,
+        "text_tokens": text_tokens,
+        "visual_tokens": visual_tokens,
+        "visual_tokens_per_image": visual_tokens_per_image,
+        "processed_image_dimensions": dimensions,
+        "image_special_tokens": image_special_tokens,
+        "input_tokens": input_tokens,
+        "max_output_tokens": max_output_tokens,
+        "required_tokens": required_tokens,
+        "remaining_tokens": EFFECTIVE_CONTEXT_LIMIT - required_tokens,
+    }
 
 
 def images_from_payload(payload: dict[str, Any]) -> list[Image.Image]:
@@ -198,6 +289,80 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+class TextOnlyInferencer:
+    """Run BAGEL/ThinkMorph's native ViT + text path without the VAE image path."""
+
+    def __init__(self, native: Any, thinking_prompt: str) -> None:
+        self.native = native
+        self.thinking_prompt = thinking_prompt
+        self.last_timing: dict[str, float | None] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.native, name)
+
+    @torch.no_grad()
+    def interleave_inference(
+        self,
+        input_lists: list[str | Image.Image],
+        *,
+        think: bool = False,
+        understanding_output: bool = True,
+        max_think_token_n: int = 512,
+        do_sample: bool = False,
+        text_temperature: float = 0.0,
+        **_: Any,
+    ) -> list[str]:
+        if not understanding_output:
+            raise ValueError("This deployment is text-only; understanding_output must be true")
+        context = self.native.init_gen_context()
+        preprocessing_seconds = 0.0
+        prefill_seconds = 0.0
+        with torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
+            if think:
+                started = time.perf_counter()
+                context = self.native.update_context_text(self.thinking_prompt, context)
+                prefill_seconds += time.perf_counter() - started
+            for term in input_lists:
+                if isinstance(term, str):
+                    started = time.perf_counter()
+                    context = self.native.update_context_text(term, context)
+                    prefill_seconds += time.perf_counter() - started
+                elif isinstance(term, Image.Image):
+                    # The pinned official inferencer first resizes every image with
+                    # its VAE transform even when VAE encoding is disabled. Skip
+                    # that generation-only resize and execute only the ViT path.
+                    started = time.perf_counter()
+                    processed = self.native.vit_transform.resize_transform(term.convert("RGB"))
+                    preprocessing_seconds += time.perf_counter() - started
+                    started = time.perf_counter()
+                    context = self.native.update_context_image(
+                        processed,
+                        context,
+                        vae=False,
+                        vit=True,
+                    )
+                    prefill_seconds += time.perf_counter() - started
+                else:
+                    raise TypeError(f"Unsupported input type: {type(term)}")
+            started = time.perf_counter()
+            text = self.native.gen_text(
+                context,
+                max_length=max_think_token_n,
+                do_sample=do_sample,
+                temperature=text_temperature,
+            )
+            decode_seconds = time.perf_counter() - started
+        self.last_timing = {
+            "image_preprocessing_seconds": preprocessing_seconds,
+            "prefill_seconds": prefill_seconds,
+            "decode_seconds": decode_seconds,
+            # The pinned native generator returns only after full decode. True
+            # TTFT needs token streaming or vLLM instrumentation.
+            "ttft_seconds": None,
+        }
+        return [text]
+
+
 class ModelRuntime:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -209,6 +374,8 @@ class ModelRuntime:
         self.completed_requests = 0
         self.failed_requests = 0
         self.last_inference_seconds: float | None = None
+        self.last_queue_seconds: float | None = None
+        self.last_timing: dict[str, float | None] = {}
         self.started_at = int(time.time())
         self.inferencer = self._load()
 
@@ -228,7 +395,7 @@ class ModelRuntime:
 
         from data.data_utils import add_special_tokens
         from data.transforms import ImageTransform
-        from inferencer import InterleaveInferencer
+        from inferencer import VLM_THINK_SYSTEM_PROMPT, InterleaveInferencer
         from modeling.autoencoder import load_ae
         from modeling.bagel import (
             Bagel,
@@ -351,62 +518,62 @@ class ModelRuntime:
             ),
             flush=True,
         )
-        # The VAE is loaded separately from the main checkpoint and therefore
-        # is not covered by Accelerate's device map. Keep it resident too so
-        # image editing/generation never mixes a CUDA latent with CPU weights.
-        vae_model = vae_model.to(device="cuda:0", dtype=torch.bfloat16).eval()
-        return InterleaveInferencer(
+        # V2 is text-output-only. The model constructor still needs the VAE
+        # config, but VAE weights stay on CPU and are never used by inference.
+        self.tokenizer = tokenizer
+        native = InterleaveInferencer(
             model=model,
             vae_model=vae_model,
             tokenizer=tokenizer,
             vae_transform=ImageTransform(1024, 512, 16),
-            vit_transform=ImageTransform(980, 224, 14),
+            vit_transform=ImageTransform(VIT_MAX_IMAGE_SIZE, VIT_MIN_IMAGE_SIZE, VIT_PATCH_SIZE),
             new_token_ids=new_token_ids,
         )
+        return TextOnlyInferencer(native, VLM_THINK_SYSTEM_PROMPT)
 
     def generate(self, payload: dict[str, Any]) -> dict[str, Any]:
-        task = str(payload.get("task", "text-to-image"))
-        supported_tasks = {"text-to-image", "image-edit", "image-understanding"}
-        if task not in supported_tasks:
-            raise ValueError(f"unsupported task {task!r}; choose one of {sorted(supported_tasks)}")
+        task = str(payload.get("task", "image-understanding"))
+        if task != "image-understanding":
+            raise ValueError(
+                f"unsupported task {task!r}; this deployment only returns text"
+            )
         input_terms, input_images, input_content_types = input_terms_from_payload(payload)
-        if task in {"image-edit", "image-understanding"} and not input_images:
-            raise ValueError(f"task {task} requires image, images, or image content")
-        image_shape = parse_size(str(payload.get("size", "512x512")))
-        default_output_tokens = 128 if task == "image-understanding" else 512
+        default_output_tokens = 128
         requested_output_tokens = payload.get(
             "max_output_tokens",
             payload.get("max_think_tokens", default_output_tokens),
         )
-        max_think_tokens = min(4096, max(16, int(requested_output_tokens)))
-        max_rounds = min(4, max(1, int(payload.get("max_rounds", 1))))
-        steps = min(100, max(10, int(payload.get("steps", 30))))
-        thinking = bool(payload.get("thinking", self.model_name == "thinkmorph-7b"))
+        max_think_tokens = min(4096, max(1, int(requested_output_tokens)))
+        thinking = bool(payload.get("thinking", False))
         set_seed(int(payload.get("seed", 0)))
+
+        token_budget = estimate_token_budget(
+            input_terms,
+            getattr(self, "tokenizer", None),
+            max_think_tokens,
+            self.inferencer.thinking_prompt if thinking else None,
+        )
+        if token_budget["required_tokens"] > EFFECTIVE_CONTEXT_LIMIT:
+            raise ValueError(
+                "context token budget exceeded: "
+                + json.dumps(token_budget, sort_keys=True, separators=(",", ":"))
+            )
 
         kwargs = {
             "think": thinking,
-            "understanding_output": task == "image-understanding",
+            "understanding_output": True,
             "max_think_token_n": max_think_tokens,
             "do_sample": bool(payload.get("do_sample", False)),
-            "text_temperature": float(payload.get("temperature", 0.3)),
-            "cfg_text_scale": float(payload.get("cfg_text_scale", 4.0)),
-            "cfg_img_scale": float(payload.get("cfg_image_scale", 1.5)),
-            "cfg_interval": [float(payload.get("cfg_interval", 0.4)), 1.0],
-            "timestep_shift": float(payload.get("timestep_shift", 3.0)),
-            "num_timesteps": steps,
-            "cfg_renorm_min": float(payload.get("cfg_renorm_min", 0.0)),
-            "cfg_renorm_type": str(payload.get("cfg_renorm_type", "global")),
-            "image_shapes": image_shape,
+            "text_temperature": float(payload.get("temperature", 0.0)),
         }
-        if self.model_name == "thinkmorph-7b":
-            kwargs["max_rounds"] = max_rounds
 
         with self.metrics_lock:
             self.queued_requests += 1
         started = time.perf_counter()
+        queue_seconds = 0.0
         try:
             with self.lock:
+                queue_seconds = time.perf_counter() - started
                 with self.metrics_lock:
                     self.queued_requests -= 1
                     self.active_requests = 1
@@ -426,28 +593,39 @@ class ModelRuntime:
             with self.metrics_lock:
                 self.active_requests = 0
                 self.last_inference_seconds = elapsed
+                self.last_queue_seconds = queue_seconds
+                self.last_timing = {
+                    **getattr(self.inferencer, "last_timing", {}),
+                    "queue_seconds": queue_seconds,
+                    "end_to_end_seconds": elapsed,
+                }
 
-        images: list[str] = []
         text_parts: list[str] = []
         if isinstance(result, dict):
-            if isinstance(result.get("image"), Image.Image):
-                images.append(image_to_data_url(result["image"]))
             if result.get("text"):
                 text_parts.append(str(result["text"]))
         elif isinstance(result, list):
             for item in result:
-                if isinstance(item, Image.Image):
-                    images.append(image_to_data_url(item))
-                elif isinstance(item, str):
+                if isinstance(item, str):
                     text_parts.append(item)
+                elif isinstance(item, Image.Image):
+                    raise TypeError("text-only inferencer unexpectedly returned an image")
+        text = "\n".join(text_parts) or None
+        output_tokens = (
+            len(self.tokenizer.encode(text))
+            if text and getattr(self, "tokenizer", None) is not None
+            else (math.ceil(len(text) / 4) if text else 0)
+        )
         return {
             "id": f"gen-{uuid.uuid4().hex}",
             "model": self.model_name,
             "task": task,
-            "text": "\n".join(text_parts) or None,
-            "images": images,
+            "text": text,
+            "output_tokens": output_tokens,
             "input_image_count": len(input_images),
             "input_content_types": input_content_types,
+            "token_budget": token_budget,
+            "timings": dict(getattr(self, "last_timing", {})),
         }
 
 
@@ -474,6 +652,8 @@ def create_app(runtime: ModelRuntime) -> FastAPI:
                 "completed": runtime.completed_requests,
                 "failed": runtime.failed_requests,
                 "last_inference_seconds": runtime.last_inference_seconds,
+                "last_queue_seconds": runtime.last_queue_seconds,
+                "last_timing": runtime.last_timing,
             }
         return {
             "status": "ok",
@@ -482,6 +662,13 @@ def create_app(runtime: ModelRuntime) -> FastAPI:
             "started_at": runtime.started_at,
             "load_mode": runtime.args.load_mode,
             "offloaded_modules": runtime.offloaded_modules,
+            "text_output_only": True,
+            "effective_context_limit": EFFECTIVE_CONTEXT_LIMIT,
+            "vit_image_size": {
+                "min_edge": VIT_MIN_IMAGE_SIZE,
+                "max_edge": VIT_MAX_IMAGE_SIZE,
+                "patch_size": VIT_PATCH_SIZE,
+            },
             "cuda": cuda,
             "requests": requests_state,
         }

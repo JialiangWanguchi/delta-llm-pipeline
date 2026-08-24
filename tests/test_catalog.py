@@ -1,4 +1,9 @@
-from delta_llm.catalog import MODEL_SPECS, estimate_weighted_gpu_hours, validate_gpu_count
+from delta_llm.catalog import (
+    MODEL_SPECS,
+    estimate_weighted_gpu_hours,
+    validate_gpu_count,
+    validate_gpu_layout,
+)
 
 
 def test_pipeline_contains_only_requested_models() -> None:
@@ -17,3 +22,10 @@ def test_dual_model_gpu_layout() -> None:
 
 def test_a100_weighted_cost() -> None:
     assert estimate_weighted_gpu_hours(4, 47.5) == 190.0
+
+
+def test_h200_layout_and_weighted_cost() -> None:
+    assert validate_gpu_layout("h200", 2)[0] is True
+    assert validate_gpu_layout("h200", 4)[0] is False
+    assert validate_gpu_layout("a100", 2)[0] is False
+    assert estimate_weighted_gpu_hours(2, 47.5, "h200") == 285.0

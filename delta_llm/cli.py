@@ -7,7 +7,7 @@ import secrets
 import sys
 from datetime import datetime, timezone
 
-from .catalog import GPU_SPECS, MODEL_SPECS, estimate_weighted_gpu_hours, validate_gpu_count
+from .catalog import GPU_SPECS, MODEL_SPECS, estimate_weighted_gpu_hours, validate_gpu_layout
 from .config import Config, load_config
 from .remote import (
     SSHRunner,
@@ -46,11 +46,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     deploy = sub.add_parser("deploy", help="Deploy both models through one SSH+Duo login")
     deploy.add_argument(
+        "--gpu-type",
+        choices=("a100", "h200"),
+        default="a100",
+        help="a100 uses four GPUs; h200 uses two GPUs",
+    )
+    deploy.add_argument(
         "--gpus",
         type=int,
-        choices=(4,),
+        choices=(2, 4),
         default=4,
-        help="Fixed at 4 A100 GPUs; each model gets one replica on each of two 40 GB GPUs",
+        help="Use 4 with A100 or 2 with H200",
     )
     deploy.add_argument("--hours", type=float, help="Wall time; maximum 48")
     deploy.add_argument("--exposure", choices=EXPOSURE_MODES)
@@ -98,13 +104,13 @@ def print_catalog() -> None:
         print(f"{model.key}: {model.label}")
         print(f"  Hugging Face: {model.model_id}")
         print(f"  Checkpoint: ~{model.checkpoint_gb:g} GB")
-        print("  A100 replicas: 2 (one replica per 40 GB GPU)")
+        print("  Replicas: 2 per model")
         print(f"  Capabilities: {', '.join(model.capabilities)}\n")
-    print("Default layout: BAGEL GPU 0/1; ThinkMorph GPU 2/3; one gateway/key.")
+    print("Layouts: 4×A100 (one replica/GPU) or 2×H200 (two replicas/GPU).")
 
 
 def collect_deploy_params(args: argparse.Namespace, config: Config, username: str) -> DeployParams:
-    ok, reason = validate_gpu_count(args.gpus)
+    ok, reason = validate_gpu_layout(args.gpu_type, args.gpus)
     if not ok:
         raise ValueError(reason)
     hours = args.hours if args.hours is not None else config.default_hours
@@ -129,6 +135,7 @@ def collect_deploy_params(args: argparse.Namespace, config: Config, username: st
         username=username,
         deployment_id=make_deployment_id(),
         api_key="sk-delta-mm-" + secrets.token_urlsafe(32),
+        gpu_type=args.gpu_type,
         gpu_count=args.gpus,
         hours=hours,
         exposure=exposure,
@@ -141,13 +148,16 @@ def collect_deploy_params(args: argparse.Namespace, config: Config, username: st
 
 
 def print_plan(params: DeployParams) -> None:
-    _, layout = validate_gpu_count(params.gpu_count)
-    estimate = estimate_weighted_gpu_hours(params.gpu_count, params.hours)
+    _, layout = validate_gpu_layout(params.gpu_type, params.gpu_count)
+    gpu_spec = GPU_SPECS[params.gpu_type]
+    estimate = estimate_weighted_gpu_hours(
+        params.gpu_count, params.hours, params.gpu_type
+    )
     print("\nDual-model deployment plan")
     print(f"  ID:          {params.deployment_id}")
     print("  Models:      bagel-7b, thinkmorph-7b")
-    print(f"  Partition:   {GPU_SPECS['a100'].partition}")
-    print(f"  GPUs:        {params.gpu_count} x {GPU_SPECS['a100'].label}")
+    print(f"  Partition:   {gpu_spec.partition}")
+    print(f"  GPUs:        {params.gpu_count} x {gpu_spec.label}")
     print(f"  Layout:      {layout}")
     print(f"  Duration:    {params.hours:g} hours")
     print(f"  Exposure:    {params.exposure}")
@@ -175,11 +185,11 @@ def run_deploy(args: argparse.Namespace, config: Config) -> int:
         "endpoint": result.endpoint,
         "expires_at": result.expires_at,
         "models": list(MODEL_SPECS),
-        "gpu": "a100",
+        "gpu": params.gpu_type,
         "gpu_count": params.gpu_count,
         "gpu_layout": {
-            "bagel-7b": [0, 1],
-            "thinkmorph-7b": [2, 3],
+            "bagel-7b": [0, 0] if params.gpu_type == "h200" else [0, 1],
+            "thinkmorph-7b": [1, 1] if params.gpu_type == "h200" else [2, 3],
         },
         "api_key": params.api_key,
         "remote_dir": result.remote_dir,

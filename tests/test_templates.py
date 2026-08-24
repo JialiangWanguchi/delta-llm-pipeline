@@ -13,12 +13,15 @@ from delta_llm.templates import (
 )
 
 
-def make_params(exposure: str = "none") -> DeployParams:
+def make_params(
+    exposure: str = "none", gpu_type: str = "a100", gpu_count: int = 4
+) -> DeployParams:
     return DeployParams(
         username="testuser",
         deployment_id="bagel-thinkmorph-20260807-120000-abcd",
         api_key="plain-secret-must-not-appear",
-        gpu_count=4,
+        gpu_type=gpu_type,
+        gpu_count=gpu_count,
         hours=1,
         exposure=exposure,
         hf_token="hf-secret-must-not-appear",
@@ -47,14 +50,18 @@ def test_generated_dual_model_script_is_safe_and_valid(exposure: str) -> None:
     assert "#SBATCH --mem=220g" in script
     assert "--model bagel-7b" in script
     assert "--model thinkmorph-7b" in script
-    assert 'BAGEL_CUDA="${CUDA_IDS[$replica]}"' in script
-    assert 'THINKMORPH_CUDA="${CUDA_IDS[$((REPLICAS_PER_MODEL + replica))]}"' in script
+    assert 'BAGEL_CUDA="${CUDA_IDS[$MODEL_GPU_OFFSET]}"' in script
+    assert 'THINKMORPH_CUDA="${CUDA_IDS[$((GPUS_PER_MODEL + MODEL_GPU_OFFSET))]}"' in script
     assert script.count("--load-mode resident") == 2
     assert script.count("--max-memory-gib 38") == 2
     assert "PORT_BASE=$((20000 + SLURM_JOB_ID % 30000))" in script
     assert 'export BAGEL_WORKER_URLS=' in script
     assert 'export THINKMORPH_WORKER_URLS=' in script
     assert '"http://127.0.0.1:$GATEWAY_PORT/v1/models"' in script
+    assert '"/v1/chat/completions" in paths' in script
+    assert "export EFFECTIVE_CONTEXT_LIMIT=28672" in script
+    assert "export VIT_MAX_IMAGE_SIZE=336" in script
+    assert 'h["text_output_only"] is True' in script
     assert "http://127.0.0.1:8000" not in script
     assert "ByteDance-Seed/BAGEL-7B-MoT" in script
     assert "ThinkMorph/ThinkMorph-7B" in script
@@ -105,6 +112,16 @@ def test_four_a100_layout_runs_two_replicas_per_model() -> None:
     assert "#SBATCH --mem=220g" in script
     assert "GPU_LAYOUT=bagel-7b:2-replicas,thinkmorph-7b:2-replicas" in script
     assert "REPLICAS_PER_MODEL=2" in script
+
+
+def test_two_h200_layout_runs_two_replicas_per_model_on_one_gpu_each() -> None:
+    script = render_deploy_script(Config(), make_params(gpu_type="h200", gpu_count=2))
+    assert "#SBATCH --partition=gpuH200x8" in script
+    assert "#SBATCH --gpus-per-node=2" in script
+    assert "GPU_TYPE=h200" in script
+    assert "GPUS_PER_MODEL=$((GPU_COUNT / 2))" in script
+    assert 'BAGEL_CUDA="${CUDA_IDS[$MODEL_GPU_OFFSET]}"' in script
+    assert 'THINKMORPH_CUDA="${CUDA_IDS[$((GPUS_PER_MODEL + MODEL_GPU_OFFSET))]}"' in script
 
 
 def test_recovery_is_explicit_and_scoped() -> None:

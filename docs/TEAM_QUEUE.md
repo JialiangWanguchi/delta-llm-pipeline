@@ -98,7 +98,9 @@ python ./examples/verify_multi_image.py \
 4. 要求两个结果都返回非空文字，并且 `input_image_count` 等于实际输入图片数；
 5. 任一模型失败时以非零退出码结束。
 
-可以重复 `--image` 2–24次。`--interleaved`要求API保留真正的文字/图片交替顺序。验收输出中的 `PASS` 会同时检查`input_image_count`和`input_content_types`；还应人工检查文字回答是否正确区分了第一张、第二张等图片。
+可以重复 `--image` 2–24次。必须按2→4→8→16→24逐级验收，不能用2图成功替代24图证据。`--interleaved`要求API保留真正的文字/图片交替顺序。验收输出中的 `PASS` 会同时检查`input_image_count`、`input_content_types`、纯文字结果和Token预算；还应人工检查回答是否正确区分每张图片的位置与内容。
+
+胜出作业还必须实测 `/v1/chat/completions`，并记录两个模型在并发1、2、4下的排队、prefill、decode、端到端时间、显存和失败率。任一24图请求发生OOM、超预算或失败时，应保留可复现配置，不得静默降低图片数。
 
 ## 4. 交接 URL/key，立即取消其余作业
 

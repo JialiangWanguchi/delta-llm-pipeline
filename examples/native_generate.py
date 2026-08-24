@@ -1,31 +1,28 @@
 from __future__ import annotations
 
-import base64
 import os
-from pathlib import Path
 
 import requests
 
 base_url = os.environ["DELTA_LLM_BASE_URL"].rstrip("/")
 headers = {"Authorization": f"Bearer {os.environ['DELTA_LLM_API_KEY']}"}
 response = requests.post(
-    f"{base_url}/generate",
+    f"{base_url}/chat/completions",
     headers=headers,
     json={
         "model": "thinkmorph-7b",
-        "task": "text-to-image",
-        "prompt": "Draw a visual step-by-step solution to a simple maze.",
-        "size": "512x512",
-        "thinking": True,
-        "max_think_tokens": 512,
-        "max_rounds": 1,
-        "steps": 30,
+        "messages": [
+            {
+                "role": "user",
+                "content": "Explain the safest path through a simple maze in text only.",
+            }
+        ],
+        "modalities": ["text"],
+        "max_tokens": 256,
+        "temperature": 0,
     },
     timeout=3600,
 )
 response.raise_for_status()
 result = response.json()
-print(result.get("text"))
-for index, data_url in enumerate(result.get("images", []), start=1):
-    encoded = data_url.split(",", 1)[1]
-    Path(f"thinkmorph_{index}.png").write_bytes(base64.b64decode(encoded))
+print(result["choices"][0]["message"]["content"])

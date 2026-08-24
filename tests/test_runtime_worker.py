@@ -5,14 +5,17 @@ import threading
 from PIL import Image
 
 from delta_llm.runtime_worker import (
+    EFFECTIVE_CONTEXT_LIMIT,
     MAX_INPUT_IMAGES,
     ModelRuntime,
     build_input_terms,
+    estimate_token_budget,
     image_from_data,
     image_to_data_url,
     images_from_payload,
     input_terms_from_payload,
     parse_size,
+    vit_processed_size,
 )
 
 
@@ -118,6 +121,25 @@ def test_interleaved_content_accepts_twenty_four_images() -> None:
     assert types == ["text", "image"] * 24 + ["text"]
 
 
+def test_twenty_four_images_fit_the_default_visual_token_budget() -> None:
+    terms: list[str | Image.Image] = []
+    for index in range(24):
+        terms.extend([f"Frame {index + 1}", Image.new("RGB", (336, 336), "green")])
+    terms.append("Summarize all frames")
+    budget = estimate_token_budget(terms, None, max_output_tokens=256)
+    assert budget["visual_tokens"] == 24 * 576
+    assert budget["required_tokens"] <= EFFECTIVE_CONTEXT_LIMIT
+    assert budget["remaining_tokens"] >= 0
+
+
+def test_vit_processed_size_is_patch_aligned_and_capped() -> None:
+    for width, height in ((336, 336), (1920, 1080), (480, 270), (100, 1000)):
+        processed_width, processed_height = vit_processed_size(width, height)
+        assert processed_width % 14 == 0
+        assert processed_height % 14 == 0
+        assert max(processed_width, processed_height) <= 336
+
+
 def test_interleaved_content_validation() -> None:
     valid = encoded_image("black")
     invalid_payloads = [
@@ -171,6 +193,8 @@ def test_runtime_passes_multiple_images_to_official_interleave_api() -> None:
     assert result["text"] == "comparison complete"
     assert result["input_image_count"] == 2
     assert result["input_content_types"] == ["text", "image", "text", "image", "text"]
+    assert "images" not in result
+    assert result["token_budget"]["required_tokens"] <= EFFECTIVE_CONTEXT_LIMIT
     assert runtime.inferencer.terms[0] == "Image 1:"
     assert runtime.inferencer.terms[2] == "Image 2:"
 
@@ -237,3 +261,33 @@ def test_runtime_rejects_unknown_task_before_inference() -> None:
         assert "unsupported task" in str(exc)
     else:
         raise AssertionError("Expected an unsupported task error")
+
+
+def test_runtime_accepts_text_only_input() -> None:
+    class FakeInferencer:
+        thinking_prompt = "think"
+
+        def interleave_inference(self, terms, **kwargs):
+            assert terms == ["Answer briefly"]
+            assert kwargs["understanding_output"] is True
+            return ["done"]
+
+    runtime = ModelRuntime.__new__(ModelRuntime)
+    runtime.model_name = "bagel-7b"
+    runtime.lock = threading.Lock()
+    runtime.metrics_lock = threading.Lock()
+    runtime.queued_requests = 0
+    runtime.active_requests = 0
+    runtime.completed_requests = 0
+    runtime.failed_requests = 0
+    runtime.last_inference_seconds = None
+    runtime.inferencer = FakeInferencer()
+    result = runtime.generate(
+        {
+            "task": "image-understanding",
+            "content": [{"type": "text", "text": "Answer briefly"}],
+            "max_output_tokens": 8,
+        }
+    )
+    assert result["text"] == "done"
+    assert result["input_image_count"] == 0

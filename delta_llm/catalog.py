@@ -32,7 +32,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         repository="https://github.com/ByteDance-Seed/BAGEL.git",
         checkpoint_gb=29.6,
         assigned_gpus=1,
-        capabilities=("text-to-image", "image-edit", "image-understanding"),
+        capabilities=("text-output", "image-understanding", "interleaved-input"),
     ),
     "thinkmorph-7b": ModelSpec(
         key="thinkmorph-7b",
@@ -41,12 +41,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         repository="https://github.com/ThinkMorph/ThinkMorph.git",
         checkpoint_gb=29.6,
         assigned_gpus=1,
-        capabilities=(
-            "text-to-image",
-            "image-edit",
-            "image-understanding",
-            "interleaved-reasoning",
-        ),
+        capabilities=("text-output", "image-understanding", "interleaved-input"),
     ),
 }
 
@@ -71,11 +66,20 @@ GPU_SPECS: dict[str, GPUSpec] = {
 }
 
 
+def validate_gpu_layout(gpu_type: str, gpu_count: int) -> tuple[bool, str]:
+    if gpu_type == "a100" and gpu_count == 4:
+        return True, "A100-0/1: BAGEL各1个副本；A100-2/3: ThinkMorph各1个副本"
+    if gpu_type == "h200" and gpu_count == 2:
+        return True, "H200-0: BAGEL两个副本；H200-1: ThinkMorph两个副本"
+    return False, "支持的布局只有4×A100或2×H200"
+
+
 def validate_gpu_count(gpu_count: int) -> tuple[bool, str]:
-    if gpu_count != 4:
-        return False, "双模型服务固定使用 4 张 A100"
-    return True, "A100-0/1: BAGEL 各1个副本；A100-2/3: ThinkMorph 各1个副本"
+    """Backward-compatible validation for the default A100 layout."""
+    return validate_gpu_layout("a100", gpu_count)
 
 
-def estimate_weighted_gpu_hours(gpu_count: int, hours: float) -> float:
-    return gpu_count * hours * GPU_SPECS["a100"].charge_factor
+def estimate_weighted_gpu_hours(
+    gpu_count: int, hours: float, gpu_type: str = "a100"
+) -> float:
+    return gpu_count * hours * GPU_SPECS[gpu_type].charge_factor

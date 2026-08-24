@@ -20,7 +20,6 @@ from typing import Any
 
 MODELS = ("bagel-7b", "thinkmorph-7b")
 IMAGE_MEDIA_TYPES = {
-    ".gif": "image/gif",
     ".jpeg": "image/jpeg",
     ".jpg": "image/jpeg",
     ".png": "image/png",
@@ -113,6 +112,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-output-tokens", type=int, default=128)
     parser.add_argument("--poll-interval", type=float, default=3.0)
     parser.add_argument("--timeout", type=float, default=900.0)
+    parser.add_argument(
+        "--skip-chat-check",
+        action="store_true",
+        help="Skip the additional two-image /v1/chat/completions contract check",
+    )
     return parser
 
 
@@ -183,20 +187,89 @@ def main(argv: list[str] | None = None) -> int:
             image_count = result.get("input_image_count")
             content_types = result.get("input_content_types")
             text = str(result.get("text") or "").strip()
+            budget = result.get("token_budget")
+            timings = result.get("timings")
             order_passed = expected_types is None or content_types == expected_types
-            passed = image_count == len(images) and bool(text) and order_passed
+            budget_passed = (
+                isinstance(budget, dict)
+                and budget.get("remaining_tokens", -1) >= 0
+                and len(budget.get("visual_tokens_per_image", [])) == len(images)
+            )
+            timing_passed = (
+                isinstance(timings, dict)
+                and timings.get("prefill_seconds") is not None
+                and timings.get("decode_seconds") is not None
+                and timings.get("end_to_end_seconds") is not None
+            )
+            passed = (
+                image_count == len(images)
+                and bool(text)
+                and order_passed
+                and budget_passed
+                and timing_passed
+                and "images" not in result
+            )
             verdict = "PASS" if passed else "FAIL"
             print(
                 f"\n[{verdict}] {model}: input_image_count={image_count}, "
-                f"elapsed={elapsed}s, input_content_types={content_types}\n{text}\n"
+                f"elapsed={elapsed}s, input_content_types={content_types}, "
+                f"token_budget={budget}, timings={timings}\n{text}\n"
             )
             if not passed:
                 failures.append(
-                    f"{model}: expected {len(images)} inputs, exact order, and non-empty text"
+                    f"{model}: expected {len(images)} inputs, exact order, text-only output, "
+                    "valid token budget, and timing metrics"
                 )
             del pending[model]
         if pending:
             time.sleep(max(0.5, args.poll_interval))
+
+    if failures:
+        print("Verification failed:", file=sys.stderr)
+        for failure in failures:
+            print(f"- {failure}", file=sys.stderr)
+        return 1
+
+    if not args.skip_chat_check:
+        chat_images = images[:2]
+        chat_content: list[dict[str, Any]] = []
+        for index, image in enumerate(chat_images, start=1):
+            chat_content.extend(
+                [
+                    {"type": "text", "text": f"Image {index} follows."},
+                    {"type": "image_url", "image_url": {"url": image}},
+                ]
+            )
+        chat_content.append({"type": "text", "text": args.prompt})
+        expected_chat_types = ["text", "image"] * len(chat_images) + ["text"]
+        for model in MODELS:
+            chat = request_json(
+                "POST",
+                f"{base_url}/chat/completions",
+                args.api_key,
+                {
+                    "model": model,
+                    "messages": [{"role": "user", "content": chat_content}],
+                    "modalities": ["text"],
+                    "max_tokens": args.max_output_tokens,
+                    "temperature": 0,
+                },
+                timeout=args.timeout,
+            )
+            answer = str(
+                ((chat.get("choices") or [{}])[0].get("message") or {}).get("content")
+                or ""
+            ).strip()
+            passed = (
+                bool(answer)
+                and chat.get("input_image_count") == len(chat_images)
+                and chat.get("input_content_types") == expected_chat_types
+                and (chat.get("token_budget") or {}).get("remaining_tokens", -1) >= 0
+                and "images" not in chat
+            )
+            print(f"[{'PASS' if passed else 'FAIL'}] {model} OpenAI chat contract")
+            if not passed:
+                failures.append(f"{model}: OpenAI chat contract failed")
 
     if failures:
         print("Verification failed:", file=sys.stderr)

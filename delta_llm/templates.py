@@ -5,6 +5,7 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
+from .catalog import GPU_SPECS
 from .config import Config
 
 
@@ -31,6 +32,7 @@ class DeployParams:
     username: str
     deployment_id: str
     api_key: str
+    gpu_type: str
     gpu_count: int
     hours: float
     exposure: str
@@ -60,6 +62,7 @@ def render_deploy_script(config: Config, params: DeployParams) -> str:
     offload_root = f"{config.work_root}/{params.username}/delta-llm/offload/{params.deployment_id}"
     legacy_env_dir = f"{config.shared_root}/envs/{env_name}"
     slurm_time = hours_to_slurm(params.hours)
+    gpu_spec = GPU_SPECS[params.gpu_type]
     replicas_per_model = 2
     service_cpus = 48
     service_memory = "220g"
@@ -100,6 +103,7 @@ DEPLOY_ID={q(params.deployment_id)}
 USER_ROOT={q(user_root)}
 DEPLOY_DIR={q(deploy_dir)}
 GPU_COUNT={params.gpu_count}
+GPU_TYPE={q(params.gpu_type)}
 EXPOSURE={q(params.exposure)}
 NAMED_URL={q(named_url)}
 API_KEY_B64={q(b64(params.api_key))}
@@ -116,8 +120,8 @@ accounts | grep -F "$ACCOUNT" >/dev/null || {{
   echo "ERROR: account $ACCOUNT is not available to $USER" >&2
   exit 20
 }}
-sinfo -h -p gpuA100x4 -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' || {{
-  echo "ERROR: gpuA100x4 is unavailable" >&2
+sinfo -h -p {gpu_spec.partition} -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' || {{
+  echo "ERROR: {gpu_spec.partition} is unavailable" >&2
   exit 23
 }}
 mkdir -p "$USER_ROOT/deployments" "$DEPLOY_DIR/logs" "$DEPLOY_DIR/secrets" \
@@ -312,7 +316,8 @@ fi
 cat > "$DEPLOY_DIR/metadata.env" <<METADATA
 DEPLOYMENT_ID=$DEPLOY_ID
 MODELS=bagel-7b,thinkmorph-7b
-GPU_PARTITION=gpuA100x4
+GPU_TYPE={params.gpu_type}
+GPU_PARTITION={gpu_spec.partition}
 GPU_COUNT=$GPU_COUNT
 GPU_LAYOUT=bagel-7b:{replicas_per_model}-replicas,thinkmorph-7b:{replicas_per_model}-replicas
 EXPOSURE=$EXPOSURE
@@ -324,7 +329,7 @@ cat > "$DEPLOY_DIR/service.slurm" <<'SERVICE_HEADER'
 SERVICE_HEADER
 cat >> "$DEPLOY_DIR/service.slurm" <<SERVICE_CONFIG
 #SBATCH --account={config.account}
-#SBATCH --partition=gpuA100x4
+#SBATCH --partition={gpu_spec.partition}
 #SBATCH --job-name=mm-{params.deployment_id[:20]}
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -354,6 +359,13 @@ source "$DEPLOY_DIR/metadata.env"
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
 export DELTA_MULTIMODAL_API_KEY="$(< "$DEPLOY_DIR/secrets/api_key")"
+export EFFECTIVE_CONTEXT_LIMIT=28672
+export VIT_MIN_IMAGE_SIZE=224
+export VIT_MAX_IMAGE_SIZE=336
+export MAX_IMAGE_BYTES=10485760
+export MAX_IMAGE_PIXELS=16000000
+export MAX_REQUEST_BYTES=67108864
+export MAX_SYNC_REQUESTS=8
 
 echo STARTING > "$DEPLOY_DIR/state"
 rm -f "$DEPLOY_DIR/endpoint"
@@ -365,7 +377,7 @@ cleanup() {{
 }}
 trap cleanup EXIT INT TERM
 
-ALLOCATED_CUDA="${{CUDA_VISIBLE_DEVICES:-0,1,2,3}}"
+ALLOCATED_CUDA="${{CUDA_VISIBLE_DEVICES:-{','.join(str(i) for i in range(params.gpu_count))}}}"
 IFS=',' read -r -a CUDA_IDS <<< "$ALLOCATED_CUDA"
 if [[ "${{#CUDA_IDS[@]}}" -lt "$GPU_COUNT" ]]; then
   echo FAILED > "$DEPLOY_DIR/state"
@@ -373,6 +385,7 @@ if [[ "${{#CUDA_IDS[@]}}" -lt "$GPU_COUNT" ]]; then
   exit 30
 fi
 REPLICAS_PER_MODEL=2
+GPUS_PER_MODEL=$((GPU_COUNT / 2))
 
 # Compute nodes can be shared by multiple jobs. Derive distinct loopback ports
 # from the Slurm job ID instead of assuming the conventional 8000/810x ports
@@ -389,8 +402,9 @@ WORKER_LOGS=()
 : > "$DEPLOY_DIR/ports.env"
 
 for ((replica=0; replica<REPLICAS_PER_MODEL; replica++)); do
-  BAGEL_CUDA="${{CUDA_IDS[$replica]}}"
-  THINKMORPH_CUDA="${{CUDA_IDS[$((REPLICAS_PER_MODEL + replica))]}}"
+  MODEL_GPU_OFFSET=$((replica % GPUS_PER_MODEL))
+  BAGEL_CUDA="${{CUDA_IDS[$MODEL_GPU_OFFSET]}}"
+  THINKMORPH_CUDA="${{CUDA_IDS[$((GPUS_PER_MODEL + MODEL_GPU_OFFSET))]}}"
   BAGEL_PORT=$((PORT_BASE + replica))
   THINKMORPH_PORT=$((PORT_BASE + REPLICAS_PER_MODEL + replica))
   BAGEL_LOG="$DEPLOY_DIR/logs/bagel_${{replica}}.log"
@@ -452,6 +466,18 @@ for index in "${{!WORKER_NAMES[@]}}"; do
     "${{WORKER_PIDS[$index]}}" "${{WORKER_LOGS[$index]}}"
 done
 
+# Refuse to advertise READY if a stale worker was staged by mistake.
+for port in "${{WORKER_PORTS[@]}}"; do
+  curl -fsS "http://127.0.0.1:$port/health" | "$ENV_DIR/bin/python" -c '
+import json, sys
+h = json.load(sys.stdin)
+assert h["text_output_only"] is True
+assert h["effective_context_limit"] == 28672
+assert h["vit_image_size"] == {{"min_edge": 224, "max_edge": 336, "patch_size": 14}}
+assert h["load_mode"] == "resident" and not h["offloaded_modules"]
+'
+done
+
 "$ENV_DIR/bin/python" "$DEPLOY_DIR/runtime/gateway.py" \
   > "$DEPLOY_DIR/logs/gateway.log" 2>&1 &
 GATEWAY_PID=$!
@@ -474,6 +500,12 @@ done
 [[ "$GATEWAY_READY" == true ]] && kill -0 "$GATEWAY_PID" 2>/dev/null || {{
   echo FAILED > "$DEPLOY_DIR/state"; exit 32;
 }}
+curl -fsS "http://127.0.0.1:$GATEWAY_PORT/openapi.json" | "$ENV_DIR/bin/python" -c '
+import json, sys
+paths = json.load(sys.stdin)["paths"]
+assert "/v1/chat/completions" in paths
+assert "/v1/jobs" in paths
+'
 
 case "$EXPOSURE" in
   none)

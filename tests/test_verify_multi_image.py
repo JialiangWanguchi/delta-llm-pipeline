@@ -42,6 +42,15 @@ def test_verifier_submits_ordered_images_to_both_models(
                 "text": "first and second are different",
                 "input_image_count": 2,
                 "elapsed_seconds": 1.25,
+                "token_budget": {
+                    "remaining_tokens": 100,
+                    "visual_tokens_per_image": [256, 256],
+                },
+                "timings": {
+                    "prefill_seconds": 0.5,
+                    "decode_seconds": 0.5,
+                    "end_to_end_seconds": 1.0,
+                },
             }
         return {"status": "succeeded", "elapsed_seconds": 1.25}
 
@@ -56,6 +65,7 @@ def test_verifier_submits_ordered_images_to_both_models(
             str(first),
             "--image",
             str(second),
+            "--skip-chat-check",
         ]
     )
 
@@ -90,6 +100,15 @@ def test_verifier_submits_exact_interleaved_content(
                 "input_image_count": 2,
                 "input_content_types": expected_types,
                 "elapsed_seconds": 1.25,
+                "token_budget": {
+                    "remaining_tokens": 100,
+                    "visual_tokens_per_image": [256, 256],
+                },
+                "timings": {
+                    "prefill_seconds": 0.5,
+                    "decode_seconds": 0.5,
+                    "end_to_end_seconds": 1.0,
+                },
             }
         return {"status": "succeeded", "elapsed_seconds": 1.25}
 
@@ -105,6 +124,7 @@ def test_verifier_submits_exact_interleaved_content(
             "--image",
             str(second),
             "--interleaved",
+            "--skip-chat-check",
         ]
     )
     assert result == 0
