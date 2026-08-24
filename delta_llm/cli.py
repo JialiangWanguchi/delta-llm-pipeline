@@ -25,6 +25,7 @@ from .templates import (
     render_list_script,
     render_logs_script,
     render_setup_status_script,
+    render_split_deploy_script,
     render_status_script,
     render_stop_script,
 )
@@ -62,6 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--exposure", choices=EXPOSURE_MODES)
     deploy.add_argument("--acknowledge-external-tunnel", action="store_true")
     deploy.add_argument("--detach", action="store_true", help="Return after sbatch submission")
+    deploy.add_argument(
+        "--split-jobs",
+        action="store_true",
+        help="Submit BAGEL and ThinkMorph as independent 1-GPU H200 jobs",
+    )
     deploy.add_argument(
         "--recover-stalled-setup",
         action="store_true",
@@ -113,6 +119,8 @@ def collect_deploy_params(args: argparse.Namespace, config: Config, username: st
     ok, reason = validate_gpu_layout(args.gpu_type, args.gpus)
     if not ok:
         raise ValueError(reason)
+    if args.split_jobs and (args.gpu_type != "h200" or args.gpus != 2):
+        raise ValueError("--split-jobs currently requires --gpu-type h200 --gpus 2")
     hours = args.hours if args.hours is not None else config.default_hours
     if not 0 < hours <= 48:
         raise ValueError("Duration must be greater than 0 and no more than 48 hours")
@@ -135,6 +143,7 @@ def collect_deploy_params(args: argparse.Namespace, config: Config, username: st
         username=username,
         deployment_id=make_deployment_id(),
         api_key="sk-delta-mm-" + secrets.token_urlsafe(32),
+        worker_api_key="sk-delta-worker-" + secrets.token_urlsafe(32),
         gpu_type=args.gpu_type,
         gpu_count=args.gpus,
         hours=hours,
@@ -144,6 +153,7 @@ def collect_deploy_params(args: argparse.Namespace, config: Config, username: st
         detach=bool(args.detach),
         recover_stalled_setup=bool(args.recover_stalled_setup),
         replace_existing_services=bool(args.replace_existing_services),
+        split_jobs=bool(args.split_jobs),
     )
 
 
@@ -159,6 +169,7 @@ def print_plan(params: DeployParams) -> None:
     print(f"  Partition:   {gpu_spec.partition}")
     print(f"  GPUs:        {params.gpu_count} x {gpu_spec.label}")
     print(f"  Layout:      {layout}")
+    print(f"  Scheduling:  {'two independent 1-GPU jobs' if params.split_jobs else 'one job'}")
     print(f"  Duration:    {params.hours:g} hours")
     print(f"  Exposure:    {params.exposure}")
     print(f"  Cost guide:  ~{estimate:.2f} weighted GPU-hours")
@@ -174,7 +185,12 @@ def run_deploy(args: argparse.Namespace, config: Config) -> int:
 
     ensure_interactive_terminal()
     print("\nEnter the NCSA password and approve Duo once.")
-    result = SSHRunner(username, config.login_host).run_script(render_deploy_script(config, params))
+    script = (
+        render_split_deploy_script(config, params)
+        if params.split_jobs
+        else render_deploy_script(config, params)
+    )
+    result = SSHRunner(username, config.login_host).run_script(script)
     if result is None:
         raise RuntimeError("Remote deployment returned no structured result")
     state = {
@@ -191,6 +207,7 @@ def run_deploy(args: argparse.Namespace, config: Config) -> int:
             "bagel-7b": [0, 0] if params.gpu_type == "h200" else [0, 1],
             "thinkmorph-7b": [1, 1] if params.gpu_type == "h200" else [2, 3],
         },
+        "split_jobs": params.split_jobs,
         "api_key": params.api_key,
         "remote_dir": result.remote_dir,
     }

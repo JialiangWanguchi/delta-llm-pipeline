@@ -9,7 +9,11 @@ from delta_llm.templates import (
     DeployParams,
     hours_to_slurm,
     render_deploy_script,
+    render_logs_script,
     render_setup_status_script,
+    render_split_deploy_script,
+    render_status_script,
+    render_stop_script,
 )
 
 
@@ -20,6 +24,7 @@ def make_params(
         username="testuser",
         deployment_id="bagel-thinkmorph-20260807-120000-abcd",
         api_key="plain-secret-must-not-appear",
+        worker_api_key="internal-secret-must-not-appear",
         gpu_type=gpu_type,
         gpu_count=gpu_count,
         hours=1,
@@ -29,6 +34,7 @@ def make_params(
         detach=False,
         recover_stalled_setup=False,
         replace_existing_services=False,
+        split_jobs=False,
     )
 
 
@@ -122,6 +128,46 @@ def test_two_h200_layout_runs_two_replicas_per_model_on_one_gpu_each() -> None:
     assert "GPUS_PER_MODEL=$((GPU_COUNT / 2))" in script
     assert 'BAGEL_CUDA="${CUDA_IDS[$MODEL_GPU_OFFSET]}"' in script
     assert 'THINKMORPH_CUDA="${CUDA_IDS[$((GPUS_PER_MODEL + MODEL_GPU_OFFSET))]}"' in script
+
+
+def test_split_h200_layout_submits_two_authenticated_single_gpu_jobs() -> None:
+    params = replace(
+        make_params(exposure="cloudflare-quick", gpu_type="h200", gpu_count=2),
+        split_jobs=True,
+    )
+    script = render_split_deploy_script(Config(), params)
+    assert "plain-secret-must-not-appear" not in script
+    assert "internal-secret-must-not-appear" not in script
+    assert script.count("sbatch --parsable") == 2
+    assert "#SBATCH --partition=gpuH200x8" in script
+    assert "#SBATCH --gpus-per-node=1" in script
+    assert "ROLE=bagel,MODEL_NAME=bagel-7b" in script
+    assert "ROLE=thinkmorph,MODEL_NAME=thinkmorph-7b" in script
+    assert "--host 0.0.0.0" in script
+    assert "DELTA_WORKER_API_KEY" in script
+    assert 'export BAGEL_WORKER_URLS="$BAGEL_URLS"' in script
+    assert "THINK_READY=true" in script
+    assert "failures=$((failures + 1))" in script
+    assert "slurm_bagel_%j.err" in script
+    assert "slurm_thinkmorph_%j.err" in script
+    bash = shutil.which("bash")
+    if bash:
+        result = subprocess.run(
+            [bash, "-n"], input=script.encode(), capture_output=True, check=False
+        )
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+
+def test_split_job_management_handles_comma_separated_job_ids() -> None:
+    status = render_status_script(Config(), "testuser", "deployment")
+    logs = render_logs_script(Config(), "testuser", "deployment", 50)
+    stop = render_stop_script(Config(), "testuser", "deployment")
+    assert "IFS=',' read -r -a JOB_IDS" in status
+    assert 'for job in "${JOB_IDS[@]}"' in status
+    assert "slurm_bagel_*.out" in logs
+    assert "slurm_thinkmorph_*.err" in logs
+    assert 'scancel "${JOB_IDS[@]}"' in stop
+    assert 'secrets/worker_api_key"' in stop
 
 
 def test_recovery_is_explicit_and_scoped() -> None:

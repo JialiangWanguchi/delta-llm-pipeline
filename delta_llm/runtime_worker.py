@@ -10,6 +10,7 @@ import math
 import os
 import random
 import re
+import secrets
 import sys
 import threading
 import time
@@ -19,7 +20,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from PIL import Image
 
 MODEL_CONFIG = {
@@ -52,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-dir", required=True)
     parser.add_argument("--offload-dir", required=True)
     parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--max-memory-gib", type=int, default=42)
     parser.add_argument(
         "--load-mode",
@@ -631,8 +633,15 @@ class ModelRuntime:
 
 def create_app(runtime: ModelRuntime) -> FastAPI:
     app = FastAPI(title=f"{runtime.model_name} internal worker")
+    worker_key = os.environ.get("DELTA_WORKER_API_KEY", "")
 
-    @app.get("/health")
+    def authorize_worker(authorization: str | None = Header(default=None)) -> None:
+        if worker_key and not secrets.compare_digest(
+            authorization or "", f"Bearer {worker_key}"
+        ):
+            raise HTTPException(status_code=401, detail="Invalid internal worker key")
+
+    @app.get("/health", dependencies=[Depends(authorize_worker)])
     def health() -> dict[str, Any]:
         cuda: dict[str, Any] = {}
         if torch.cuda.is_available():
@@ -673,7 +682,7 @@ def create_app(runtime: ModelRuntime) -> FastAPI:
             "requests": requests_state,
         }
 
-    @app.post("/generate")
+    @app.post("/generate", dependencies=[Depends(authorize_worker)])
     def generate(payload: dict[str, Any]) -> dict[str, Any]:
         try:
             return runtime.generate(payload)
@@ -697,4 +706,4 @@ if __name__ == "__main__":
 
     args = parse_args()
     runtime = ModelRuntime(args)
-    uvicorn.run(create_app(runtime), host="127.0.0.1", port=args.port, log_level="info")
+    uvicorn.run(create_app(runtime), host=args.host, port=args.port, log_level="info")

@@ -32,6 +32,7 @@ class DeployParams:
     username: str
     deployment_id: str
     api_key: str
+    worker_api_key: str
     gpu_type: str
     gpu_count: int
     hours: float
@@ -41,6 +42,7 @@ class DeployParams:
     detach: bool
     recover_stalled_setup: bool
     replace_existing_services: bool
+    split_jobs: bool
 
 
 def render_deploy_script(config: Config, params: DeployParams) -> str:
@@ -588,6 +590,316 @@ exit 37
 """
 
 
+def render_split_deploy_script(config: Config, params: DeployParams) -> str:
+    if params.gpu_type != "h200" or params.gpu_count != 2:
+        raise ValueError("split deployment requires exactly 2×H200")
+    user_root = f"{config.project_root}/{params.username}/delta-llm"
+    deploy_dir = f"{user_root}/deployments/{params.deployment_id}"
+    env_name = (
+        f"multimodal-py{config.python_version}-torch{config.torch_version}-{config.cuda_wheel}"
+    )
+    env_dir = f"{config.runtime_root}/envs/{env_name}"
+    source_root = f"{config.shared_root}/sources"
+    bagel_repo = f"{source_root}/bagel"
+    thinkmorph_repo = f"{source_root}/thinkmorph"
+    bagel_model = f"{config.shared_root}/models/BAGEL-7B-MoT"
+    thinkmorph_model = f"{config.shared_root}/models/ThinkMorph-7B"
+    cloudflared = f"{config.shared_root}/bin/cloudflared"
+    offload_root = f"{config.work_root}/{params.username}/delta-llm/offload/{params.deployment_id}"
+    slurm_time = hours_to_slurm(params.hours)
+    named_url = config.named_public_url if params.exposure == "cloudflare-named" else ""
+    worker_b64 = b64(runtime_source("runtime_worker.py"))
+    gateway_b64 = b64(runtime_source("runtime_gateway.py"))
+
+    return rf"""#!/usr/bin/env bash
+set -euo pipefail
+umask 007
+
+ACCOUNT={q(config.account)}
+DEPLOY_ID={q(params.deployment_id)}
+DEPLOY_DIR={q(deploy_dir)}
+ENV_DIR={q(env_dir)}
+BAGEL_REPO={q(bagel_repo)}
+THINKMORPH_REPO={q(thinkmorph_repo)}
+BAGEL_MODEL={q(bagel_model)}
+THINKMORPH_MODEL={q(thinkmorph_model)}
+CLOUDFLARED={q(cloudflared)}
+OFFLOAD_ROOT={q(offload_root)}
+EXPOSURE={q(params.exposure)}
+NAMED_URL={q(named_url)}
+API_KEY_B64={q(b64(params.api_key))}
+WORKER_KEY_B64={q(b64(params.worker_api_key))}
+CF_TOKEN_B64={q(b64(params.cf_tunnel_token))}
+
+accounts | grep -F "$ACCOUNT" >/dev/null || {{ echo "ERROR: account unavailable" >&2; exit 20; }}
+sinfo -h -p gpuH200x8 -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' || {{
+  echo "ERROR: gpuH200x8 is unavailable" >&2; exit 23;
+}}
+
+mkdir -p "$DEPLOY_DIR/logs" "$DEPLOY_DIR/secrets" "$DEPLOY_DIR/runtime" \
+  "$DEPLOY_DIR/registry" "$OFFLOAD_ROOT"
+chmod 700 "$DEPLOY_DIR" "$DEPLOY_DIR/secrets" "$DEPLOY_DIR/registry"
+
+[[ -x "$ENV_DIR/bin/python" ]] || {{ echo "ERROR: shared runtime is not ready" >&2; exit 24; }}
+[[ -d "$BAGEL_REPO/.git" && -d "$THINKMORPH_REPO/.git" ]] || {{
+  echo "ERROR: shared model sources are missing" >&2; exit 24;
+}}
+[[ -s "$BAGEL_MODEL/ema.safetensors" && -s "$THINKMORPH_MODEL/model.safetensors" ]] || {{
+  echo "ERROR: shared checkpoints are missing" >&2; exit 24;
+}}
+
+printf '%s' "$API_KEY_B64" | base64 -d > "$DEPLOY_DIR/secrets/api_key"
+printf '%s' "$WORKER_KEY_B64" | base64 -d > "$DEPLOY_DIR/secrets/worker_api_key"
+chmod 600 "$DEPLOY_DIR/secrets/api_key" "$DEPLOY_DIR/secrets/worker_api_key"
+if [[ -n "$CF_TOKEN_B64" ]]; then
+  printf '%s' "$CF_TOKEN_B64" | base64 -d > "$DEPLOY_DIR/secrets/cf_tunnel_token"
+  chmod 600 "$DEPLOY_DIR/secrets/cf_tunnel_token"
+fi
+printf '%s' {q(worker_b64)} | base64 -d > "$DEPLOY_DIR/runtime/worker.py"
+printf '%s' {q(gateway_b64)} | base64 -d > "$DEPLOY_DIR/runtime/gateway.py"
+chmod 700 "$DEPLOY_DIR/runtime/worker.py" "$DEPLOY_DIR/runtime/gateway.py"
+
+if [[ "$EXPOSURE" == cloudflare-* && ! -x "$CLOUDFLARED" ]]; then
+  TMP_CF="$CLOUDFLARED.tmp.$$"
+  curl -fsSL {q(config.cloudflared_url)} -o "$TMP_CF"
+  chmod 750 "$TMP_CF"
+  mv -f "$TMP_CF" "$CLOUDFLARED"
+fi
+
+cat > "$DEPLOY_DIR/metadata.env" <<METADATA
+DEPLOYMENT_ID=$DEPLOY_ID
+MODELS=bagel-7b,thinkmorph-7b
+GPU_TYPE=h200
+GPU_PARTITION=gpuH200x8
+GPU_COUNT=2
+GPU_LAYOUT=split:bagel-1xh200,thinkmorph-1xh200
+EXPOSURE=$EXPOSURE
+METADATA
+chmod 600 "$DEPLOY_DIR/metadata.env"
+echo SUBMITTED > "$DEPLOY_DIR/state"
+rm -f "$DEPLOY_DIR/endpoint" "$DEPLOY_DIR/registry"/*.env
+
+cat > "$DEPLOY_DIR/split_model.slurm" <<'SPLIT_JOB'
+#!/usr/bin/env bash
+#SBATCH --account={config.account}
+#SBATCH --partition=gpuH200x8
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --gpus-per-node=1
+#SBATCH --mem=240g
+#SBATCH --time={slurm_time}
+
+set -euo pipefail
+umask 077
+DEPLOY_DIR={q(deploy_dir)}
+ENV_DIR={q(env_dir)}
+BAGEL_REPO={q(bagel_repo)}
+THINKMORPH_REPO={q(thinkmorph_repo)}
+BAGEL_MODEL={q(bagel_model)}
+THINKMORPH_MODEL={q(thinkmorph_model)}
+CLOUDFLARED={q(cloudflared)}
+OFFLOAD_ROOT={q(offload_root)}
+EXPOSURE={q(params.exposure)}
+NAMED_URL={q(named_url)}
+ROLE="${{ROLE:?ROLE is required}}"
+MODEL_NAME="${{MODEL_NAME:?MODEL_NAME is required}}"
+source "$DEPLOY_DIR/metadata.env"
+export TOKENIZERS_PARALLELISM=false
+export PYTHONUNBUFFERED=1
+export DELTA_MULTIMODAL_API_KEY="$(< "$DEPLOY_DIR/secrets/api_key")"
+export DELTA_WORKER_API_KEY="$(< "$DEPLOY_DIR/secrets/worker_api_key")"
+export EFFECTIVE_CONTEXT_LIMIT=28672
+export VIT_MIN_IMAGE_SIZE=224
+export VIT_MAX_IMAGE_SIZE=336
+export MAX_IMAGE_BYTES=10485760
+export MAX_IMAGE_PIXELS=16000000
+export MAX_REQUEST_BYTES=67108864
+export MAX_SYNC_REQUESTS=8
+
+PIDS=()
+REGISTRY="$DEPLOY_DIR/registry/$ROLE.env"
+cleanup() {{
+  for pid in "${{PIDS[@]}}"; do kill "$pid" 2>/dev/null || true; done
+  rm -f "$REGISTRY"
+  current="$(cat "$DEPLOY_DIR/state" 2>/dev/null || true)"
+  [[ "$current" == STOPPED ]] || echo FAILED > "$DEPLOY_DIR/state"
+}}
+trap cleanup EXIT INT TERM
+
+PORT_BASE=$((20000 + SLURM_JOB_ID % 30000))
+NODE_HOST="$(hostname -f)"
+GPU_ID="${{CUDA_VISIBLE_DEVICES%%,*}}"
+URLS=()
+LOG_PREFIX="$ROLE"
+if [[ "$ROLE" == bagel ]]; then
+  REPO_DIR="$BAGEL_REPO"; MODEL_DIR="$BAGEL_MODEL"
+else
+  REPO_DIR="$THINKMORPH_REPO"; MODEL_DIR="$THINKMORPH_MODEL"
+fi
+
+for replica in 0 1; do
+  PORT=$((PORT_BASE + replica))
+  LOG="$DEPLOY_DIR/logs/${{LOG_PREFIX}}_${{replica}}.log"
+  CUDA_VISIBLE_DEVICES="$GPU_ID" "$ENV_DIR/bin/python" \
+    "$DEPLOY_DIR/runtime/worker.py" --model "$MODEL_NAME" --host 0.0.0.0 \
+    --repo-dir "$REPO_DIR" --checkpoint-dir "$MODEL_DIR" \
+    --offload-dir "$OFFLOAD_ROOT/${{ROLE}}_${{replica}}" --load-mode resident \
+    --max-memory-gib 135 --port "$PORT" > "$LOG" 2>&1 &
+  PIDS+=("$!")
+  URLS+=("http://$NODE_HOST:$PORT")
+done
+
+for index in 0 1; do
+  port=$((PORT_BASE + index)); pid="${{PIDS[$index]}}"
+  for _ in $(seq 1 540); do
+    curl -fsS -H "Authorization: Bearer $DELTA_WORKER_API_KEY" \
+      "http://127.0.0.1:$port/health" >/dev/null 2>&1 && break
+    kill -0 "$pid" 2>/dev/null || {{ tail -n 200 "$DEPLOY_DIR/logs/${{ROLE}}_${{index}}.log"; exit 30; }}
+    sleep 10
+  done
+  curl -fsS -H "Authorization: Bearer $DELTA_WORKER_API_KEY" \
+    "http://127.0.0.1:$port/health" >/dev/null
+done
+
+TMP_REGISTRY="$REGISTRY.$SLURM_JOB_ID.tmp"
+printf 'JOB_ID=%s\nNODE=%s\nURLS=%s\n' "$SLURM_JOB_ID" "$NODE_HOST" \
+  "$(IFS=,; echo "${{URLS[*]}}")" > "$TMP_REGISTRY"
+mv -f "$TMP_REGISTRY" "$REGISTRY"
+echo "[delta-split] $ROLE workers READY on $NODE_HOST"
+
+if [[ "$ROLE" == thinkmorph ]]; then
+  wait -n "${{PIDS[@]}}"
+  exit 31
+fi
+
+# BAGEL owns the unified gateway and waits for the independently scheduled
+# ThinkMorph job to register two authenticated worker URLs.
+BAGEL_URLS="$(IFS=,; echo "${{URLS[*]}}")"
+THINK_REGISTRY="$DEPLOY_DIR/registry/thinkmorph.env"
+THINK_READY=false
+for _ in $(seq 1 11400); do
+  if [[ -s "$THINK_REGISTRY" ]]; then
+    source "$THINK_REGISTRY"
+    THINK_URLS="$URLS"
+    healthy=true
+    IFS=',' read -r -a candidates <<< "$THINK_URLS"
+    for url in "${{candidates[@]}}"; do
+      curl -fsS -H "Authorization: Bearer $DELTA_WORKER_API_KEY" \
+        "$url/health" >/dev/null 2>&1 || healthy=false
+    done
+    if [[ "$healthy" == true ]]; then
+      THINK_READY=true
+      break
+    fi
+  fi
+  sleep 15
+done
+[[ "$THINK_READY" == true ]] || {{ echo "ThinkMorph did not become ready" >&2; exit 32; }}
+export BAGEL_WORKER_URLS="$BAGEL_URLS"
+export THINKMORPH_WORKER_URLS="$THINK_URLS"
+GATEWAY_PORT=$((PORT_BASE + 4))
+export GATEWAY_PORT
+"$ENV_DIR/bin/python" "$DEPLOY_DIR/runtime/gateway.py" \
+  > "$DEPLOY_DIR/logs/gateway.log" 2>&1 &
+PIDS+=("$!")
+for _ in $(seq 1 90); do
+  curl -fsS "http://127.0.0.1:$GATEWAY_PORT/health" | \
+    "$ENV_DIR/bin/python" -c 'import json,sys; h=json.load(sys.stdin); assert h["status"]=="ok"' \
+    >/dev/null 2>&1 && break
+  sleep 2
+done
+curl -fsS "http://127.0.0.1:$GATEWAY_PORT/health" | \
+  "$ENV_DIR/bin/python" -c 'import json,sys; h=json.load(sys.stdin); assert h["status"]=="ok"'
+
+case "$EXPOSURE" in
+  none) ENDPOINT="http://$NODE_HOST:$GATEWAY_PORT/v1" ;;
+  cloudflare-quick)
+    "$CLOUDFLARED" tunnel --url "http://127.0.0.1:$GATEWAY_PORT" --no-autoupdate \
+      > "$DEPLOY_DIR/logs/cloudflared.log" 2>&1 &
+    PIDS+=("$!"); ENDPOINT=""
+    for _ in $(seq 1 60); do
+      ENDPOINT="$(grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' \
+        "$DEPLOY_DIR/logs/cloudflared.log" | head -n 1 || true)"
+      [[ -n "$ENDPOINT" ]] && break
+      sleep 2
+    done
+    [[ -n "$ENDPOINT" ]] || exit 33
+    ENDPOINT="$ENDPOINT/v1"
+    ;;
+  cloudflare-named)
+    CF_TOKEN="$(< "$DEPLOY_DIR/secrets/cf_tunnel_token")"
+    "$CLOUDFLARED" tunnel --no-autoupdate run --token "$CF_TOKEN" \
+      > "$DEPLOY_DIR/logs/cloudflared.log" 2>&1 &
+    PIDS+=("$!"); sleep 5; ENDPOINT="$NAMED_URL/v1"
+    ;;
+  *) exit 34 ;;
+esac
+
+# Treat a sustained loss of the remote ThinkMorph workers as a deployment
+# failure so Slurm and the local state do not report a misleading READY API.
+(
+  failures=0
+  IFS=',' read -r -a remote_workers <<< "$THINKMORPH_WORKER_URLS"
+  while sleep 15; do
+    healthy=true
+    for url in "${{remote_workers[@]}}"; do
+      curl -fsS -H "Authorization: Bearer $DELTA_WORKER_API_KEY" \
+        "$url/health" >/dev/null 2>&1 || healthy=false
+    done
+    if [[ "$healthy" == true ]]; then
+      failures=0
+    else
+      failures=$((failures + 1))
+      [[ "$failures" -lt 4 ]] || exit 41
+    fi
+  done
+) &
+PIDS+=("$!")
+
+printf '%s\n' "$ENDPOINT" > "$DEPLOY_DIR/endpoint"
+echo READY > "$DEPLOY_DIR/state"
+echo "[delta-split] unified API READY: $ENDPOINT"
+wait -n "${{PIDS[@]}}"
+exit 35
+SPLIT_JOB
+chmod 700 "$DEPLOY_DIR/split_model.slurm"
+
+BAGEL_JOB="$(sbatch --parsable --job-name=mm-bagel-{params.deployment_id[:16]} \
+  --output="$DEPLOY_DIR/logs/slurm_bagel_%j.out" \
+  --error="$DEPLOY_DIR/logs/slurm_bagel_%j.err" \
+  --export=ALL,ROLE=bagel,MODEL_NAME=bagel-7b "$DEPLOY_DIR/split_model.slurm")"
+if ! THINK_JOB="$(sbatch --parsable --job-name=mm-think-{params.deployment_id[:16]} \
+  --output="$DEPLOY_DIR/logs/slurm_thinkmorph_%j.out" \
+  --error="$DEPLOY_DIR/logs/slurm_thinkmorph_%j.err" \
+  --export=ALL,ROLE=thinkmorph,MODEL_NAME=thinkmorph-7b "$DEPLOY_DIR/split_model.slurm")"; then
+  scancel "$BAGEL_JOB" 2>/dev/null || true
+  exit 36
+fi
+printf '%s,%s\n' "$BAGEL_JOB" "$THINK_JOB" > "$DEPLOY_DIR/job_id"
+printf 'BAGEL_JOB=%s\nTHINKMORPH_JOB=%s\n' "$BAGEL_JOB" "$THINK_JOB" \
+  > "$DEPLOY_DIR/job_ids.env"
+echo "[delta-split] BAGEL job $BAGEL_JOB submitted"
+echo "[delta-split] ThinkMorph job $THINK_JOB submitted"
+
+if [[ {str(params.detach).lower()} == true ]]; then
+  echo "DELTA_LLM_RESULT|$DEPLOY_ID|$BAGEL_JOB,$THINK_JOB|SUBMITTED|-|-|$DEPLOY_DIR"
+  exit 0
+fi
+for _ in $(seq 1 12000); do
+  STATE="$(cat "$DEPLOY_DIR/state" 2>/dev/null || true)"
+  if [[ "$STATE" == READY && -s "$DEPLOY_DIR/endpoint" ]]; then
+    ENDPOINT="$(< "$DEPLOY_DIR/endpoint")"
+    echo "DELTA_LLM_RESULT|$DEPLOY_ID|$BAGEL_JOB,$THINK_JOB|READY|$ENDPOINT|-|$DEPLOY_DIR"
+    exit 0
+  fi
+  squeue -h -j "$BAGEL_JOB,$THINK_JOB" -o '[delta-split] %i %T: %R'
+  sleep 15
+done
+exit 37
+"""
+
+
 def render_status_script(config: Config, username: str, deployment_id: str) -> str:
     deploy_dir = f"{config.project_root}/{username}/delta-llm/deployments/{deployment_id}"
     return rf"""#!/usr/bin/env bash
@@ -597,11 +909,14 @@ DEPLOY_DIR={q(deploy_dir)}
 JOB_ID="$(< "$DEPLOY_DIR/job_id")"
 STATE="$(cat "$DEPLOY_DIR/state" 2>/dev/null || echo UNKNOWN)"
 ENDPOINT="$(cat "$DEPLOY_DIR/endpoint" 2>/dev/null || echo -)"
-if squeue -h -j "$JOB_ID" | grep -q .; then
-  squeue -j "$JOB_ID" -o 'JOBID=%i STATE=%T ELAPSED=%M LIMIT=%l NODE=%R'
-else
-  sacct -X -j "$JOB_ID" -o JobID,State,Elapsed,Timelimit,NodeList
-fi
+IFS=',' read -r -a JOB_IDS <<< "$JOB_ID"
+for job in "${{JOB_IDS[@]}}"; do
+  if squeue -h -j "$job" | grep -q .; then
+    squeue -j "$job" -o 'JOBID=%i STATE=%T ELAPSED=%M LIMIT=%l NODE=%R'
+  else
+    sacct -X -j "$job" -o JobID,State,Elapsed,Timelimit,NodeList
+  fi
+done
 echo "DEPLOYMENT={deployment_id} STATE=$STATE ENDPOINT=$ENDPOINT"
 echo "DELTA_LLM_RESULT|{deployment_id}|$JOB_ID|$STATE|$ENDPOINT|-|$DEPLOY_DIR"
 """
@@ -615,7 +930,10 @@ DEPLOY_DIR={q(deploy_dir)}
 [[ -d "$DEPLOY_DIR" ]] || {{ echo "Deployment not found" >&2; exit 40; }}
 for file in "$DEPLOY_DIR"/logs/bagel_*.log \
   "$DEPLOY_DIR"/logs/thinkmorph_*.log \
-  "$DEPLOY_DIR"/logs/gateway.log "$DEPLOY_DIR"/logs/cloudflared.log; do
+  "$DEPLOY_DIR"/logs/gateway.log "$DEPLOY_DIR"/logs/cloudflared.log \
+  "$DEPLOY_DIR"/logs/slurm_bagel_*.out "$DEPLOY_DIR"/logs/slurm_bagel_*.err \
+  "$DEPLOY_DIR"/logs/slurm_thinkmorph_*.out \
+  "$DEPLOY_DIR"/logs/slurm_thinkmorph_*.err; do
   [[ -f "$file" ]] || continue
   echo "===== ${{file##*/}} ====="
   tail -n {lines} "$file"
@@ -630,8 +948,10 @@ set -euo pipefail
 DEPLOY_DIR={q(deploy_dir)}
 [[ -d "$DEPLOY_DIR" ]] || {{ echo "Deployment not found" >&2; exit 40; }}
 JOB_ID="$(< "$DEPLOY_DIR/job_id")"
-scancel "$JOB_ID" 2>/dev/null || true
-rm -f "$DEPLOY_DIR/secrets/api_key" "$DEPLOY_DIR/secrets/cf_tunnel_token" "$DEPLOY_DIR/endpoint"
+IFS=',' read -r -a JOB_IDS <<< "$JOB_ID"
+scancel "${{JOB_IDS[@]}}" 2>/dev/null || true
+rm -f "$DEPLOY_DIR/secrets/api_key" "$DEPLOY_DIR/secrets/worker_api_key" \
+  "$DEPLOY_DIR/secrets/cf_tunnel_token" "$DEPLOY_DIR/endpoint"
 echo STOPPED > "$DEPLOY_DIR/state"
 echo "Stopped job $JOB_ID and revoked its API key"
 echo "DELTA_LLM_RESULT|{deployment_id}|$JOB_ID|STOPPED|-|-|$DEPLOY_DIR"

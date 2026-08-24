@@ -19,6 +19,11 @@ from fastapi.responses import JSONResponse
 from PIL import Image
 
 API_KEY = os.environ["DELTA_MULTIMODAL_API_KEY"]
+WORKER_API_KEY = os.environ.get("DELTA_WORKER_API_KEY", "")
+
+
+def worker_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {WORKER_API_KEY}"} if WORKER_API_KEY else {}
 
 
 def worker_urls(plural_name: str, singular_name: str, default: str) -> list[str]:
@@ -405,6 +410,7 @@ def worker_request_to(worker: str, payload: dict[str, Any]) -> dict[str, Any]:
         response = requests.post(
             f"{worker}/generate",
             json=payload,
+            headers=worker_headers(),
             timeout=(10, REQUEST_TIMEOUT),
         )
     except requests.RequestException as exc:
@@ -580,7 +586,7 @@ def health() -> dict[str, Any]:
         replicas: list[dict[str, Any]] = []
         for replica, url in enumerate(urls):
             try:
-                response = requests.get(f"{url}/health", timeout=3)
+                response = requests.get(f"{url}/health", headers=worker_headers(), timeout=3)
                 detail = response.json() if response.ok else {"status": "error"}
             except requests.RequestException:
                 detail = {"status": "unavailable"}

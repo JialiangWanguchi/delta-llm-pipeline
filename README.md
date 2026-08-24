@@ -70,6 +70,16 @@ macOS/Linux：
 
 H200-0承载两个BAGEL副本，H200-1承载两个ThinkMorph副本；每张卡约55GiB模型权重，141GiB显存足够保留长上下文和KV Cache余量。
 
+如果双卡同时可用导致预计排队较久，可以把同样的两张H200拆成两个独立的单卡作业：
+
+```powershell
+.\run.ps1 --username your_ncsa_username deploy `
+  --gpu-type h200 --gpus 2 --split-jobs --hours 47.5 `
+  --exposure cloudflare-quick --acknowledge-external-tunnel --detach
+```
+
+该模式分别提交BAGEL和ThinkMorph单卡作业；两者都启动后仍只暴露一个HTTPS Base URL和一个外部API Key。`status`会显示两个Job ID。如果只有一个作业开始运行，整体状态不会变为`READY`，但已运行作业会开始消耗GPU-hours，因此应持续查看两个作业的状态。
+
 ## OpenAI兼容调用
 
 ```python

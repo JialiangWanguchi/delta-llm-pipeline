@@ -36,6 +36,8 @@ cd delta-llm-pipeline
 
 `--detach` 会在提交 Slurm 作业并保存本地 API key 后退出，适合等待时间较长的队列，可避免让 SSH 会话持续挂一天。请记录输出中的 `Deployment` 和 `Job`。不要在第一次提交时使用 `--replace-existing-services`；该参数只用于同一成员明确替换自己的旧作业。
 
+双卡H200若因gang scheduling预计等待过久，可加`--gpu-type h200 --gpus 2 --split-jobs`，把两个模型分别提交为独立的单卡H200作业。输出中的`Job`会包含两个逗号分隔的Job ID；统一URL只有在两个作业都启动并通过健康检查后才会生成。拆分可能更早拿到单卡，但两个作业启动时间不同会造成部分GPU先计费而服务尚未完整可用。
+
 本地状态文件位于：
 
 ```text
@@ -55,6 +57,8 @@ Linux/macOS: ~/.delta-llm/deployments/DEPLOYMENT_ID.json
 - `STARTING`：节点已分配，正在把四个模型副本加载进显存；
 - `READY`：公网 URL 已生成，可以验收；
 - `FAILED`：运行 `logs` 查看模型、Gateway和Tunnel日志。
+
+拆分部署的`status`会分别列出BAGEL和ThinkMorph两个Slurm作业；必须两个都在运行，整体服务才可能是`READY`。
 
 ```powershell
 .\run.ps1 --username YOUR_NCSA_USERNAME logs DEPLOYMENT_ID --lines 200
