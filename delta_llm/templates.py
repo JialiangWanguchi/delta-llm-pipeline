@@ -43,6 +43,7 @@ class DeployParams:
     recover_stalled_setup: bool
     replace_existing_services: bool
     split_jobs: bool
+    models: tuple[str, ...] = ("bagel-7b", "thinkmorph-7b")
 
 
 def render_deploy_script(config: Config, params: DeployParams) -> str:
@@ -66,7 +67,9 @@ def render_deploy_script(config: Config, params: DeployParams) -> str:
     slurm_time = hours_to_slurm(params.hours)
     gpu_spec = GPU_SPECS[params.gpu_type]
     replicas_per_model = 2
-    service_cpus = 48
+    # Delta bills H200 jobs in 12-core equivalents. Two model services need
+    # 12 cores each; requesting the A100 default of 48 would double H200 cost.
+    service_cpus = 24 if params.gpu_type == "h200" else 48
     service_memory = "220g"
     named_url = config.named_public_url if params.exposure == "cloudflare-named" else ""
     env_fingerprint = ";".join(
@@ -591,7 +594,15 @@ exit 37
 
 
 def render_split_deploy_script(config: Config, params: DeployParams) -> str:
-    if (params.gpu_type, params.gpu_count) not in {("a100", 4), ("h200", 2)}:
+    single_model = len(params.models) == 1
+    if not params.models or any(
+        model not in {"bagel-7b", "thinkmorph-7b"} for model in params.models
+    ):
+        raise ValueError("models must contain bagel-7b and/or thinkmorph-7b")
+    if single_model:
+        if (params.gpu_type, params.gpu_count) not in {("a100", 2), ("h200", 1)}:
+            raise ValueError("single-model deployment requires 2×A100 or 1×H200")
+    elif (params.gpu_type, params.gpu_count) not in {("a100", 4), ("h200", 2)}:
         raise ValueError("split deployment requires 4×A100 or 2×H200")
     user_root = f"{config.project_root}/{params.username}/delta-llm"
     deploy_dir = f"{user_root}/deployments/{params.deployment_id}"
@@ -613,17 +624,117 @@ def render_split_deploy_script(config: Config, params: DeployParams) -> str:
         cpus_per_job = 24
         memory_per_job = "110g"
         worker_max_memory = 38
-        gpu_layout = "split:bagel-2xa100,thinkmorph-2xa100"
+        gpu_layout = (
+            f"single:{params.models[0]}-2xa100"
+            if single_model
+            else "split:bagel-2xa100,thinkmorph-2xa100"
+        )
     else:
         partition = "gpuH200x8"
         gpus_per_job = 1
         cpus_per_job = 12
         memory_per_job = "240g"
         worker_max_memory = 135
-        gpu_layout = "split:bagel-1xh200,thinkmorph-1xh200"
+        gpu_layout = (
+            f"single:{params.models[0]}-1xh200"
+            if single_model
+            else "split:bagel-1xh200,thinkmorph-1xh200"
+        )
     named_url = config.named_public_url if params.exposure == "cloudflare-named" else ""
     worker_b64 = b64(runtime_source("runtime_worker.py"))
     gateway_b64 = b64(runtime_source("runtime_gateway.py"))
+    models_csv = ",".join(params.models)
+    replace_existing = str(params.replace_existing_services).lower()
+
+    if single_model:
+        selected_model = params.models[0]
+        selected_role = "bagel" if selected_model == "bagel-7b" else "thinkmorph"
+        gateway_setup = r'''WORKER_URLS="$(IFS=,; echo "${URLS[*]}")"
+if [[ "$ROLE" == bagel ]]; then
+  export BAGEL_WORKER_URLS="$WORKER_URLS"
+else
+  export THINKMORPH_WORKER_URLS="$WORKER_URLS"
+fi
+export DELTA_ENABLED_MODELS="$MODEL_NAME"'''
+        remote_monitor = ""
+        submit_jobs = f'''JOB_ID="$(sbatch --parsable --job-name=mm-{selected_role}-{params.deployment_id[:16]} \\
+  --output="$DEPLOY_DIR/logs/slurm_{selected_role}_%j.out" \\
+  --error="$DEPLOY_DIR/logs/slurm_{selected_role}_%j.err" \\
+  --export=ALL,ROLE={selected_role},MODEL_NAME={selected_model} "$DEPLOY_DIR/split_model.slurm")"
+printf '%s\\n' "$JOB_ID" > "$DEPLOY_DIR/job_id"
+printf '{selected_role.upper()}_JOB=%s\\n' "$JOB_ID" > "$DEPLOY_DIR/job_ids.env"
+echo "[delta-single] {selected_model} job $JOB_ID submitted"'''
+        submitted_jobs = "$JOB_ID"
+        wait_label = "delta-single"
+    else:
+        gateway_setup = r'''if [[ "$ROLE" == thinkmorph ]]; then
+  wait -n "${PIDS[@]}"
+  exit 31
+fi
+
+# BAGEL owns the unified gateway and waits for the independently scheduled
+# ThinkMorph job to register two authenticated worker URLs.
+BAGEL_URLS="$(IFS=,; echo "${URLS[*]}")"
+THINK_REGISTRY="$DEPLOY_DIR/registry/thinkmorph.env"
+THINK_READY=false
+for _ in $(seq 1 11400); do
+  if [[ -s "$THINK_REGISTRY" ]]; then
+    source "$THINK_REGISTRY"
+    THINK_URLS="$URLS"
+    healthy=true
+    IFS=',' read -r -a candidates <<< "$THINK_URLS"
+    for url in "${candidates[@]}"; do
+      curl -fsS -H "Authorization: Bearer $DELTA_WORKER_API_KEY" \
+        "$url/health" >/dev/null 2>&1 || healthy=false
+    done
+    if [[ "$healthy" == true ]]; then
+      THINK_READY=true
+      break
+    fi
+  fi
+  sleep 15
+done
+[[ "$THINK_READY" == true ]] || { echo "ThinkMorph did not become ready" >&2; exit 32; }
+export BAGEL_WORKER_URLS="$BAGEL_URLS"
+export THINKMORPH_WORKER_URLS="$THINK_URLS"'''
+        remote_monitor = r'''# Treat a sustained loss of the remote ThinkMorph workers as a deployment
+# failure so Slurm and the local state do not report a misleading READY API.
+(
+  failures=0
+  IFS=',' read -r -a remote_workers <<< "$THINKMORPH_WORKER_URLS"
+  while sleep 15; do
+    healthy=true
+    for url in "${remote_workers[@]}"; do
+      curl -fsS -H "Authorization: Bearer $DELTA_WORKER_API_KEY" \
+        "$url/health" >/dev/null 2>&1 || healthy=false
+    done
+    if [[ "$healthy" == true ]]; then
+      failures=0
+    else
+      failures=$((failures + 1))
+      [[ "$failures" -lt 4 ]] || exit 41
+    fi
+  done
+) &
+PIDS+=("$!")'''
+        submit_jobs = f'''BAGEL_JOB="$(sbatch --parsable --job-name=mm-bagel-{params.deployment_id[:16]} \\
+  --output="$DEPLOY_DIR/logs/slurm_bagel_%j.out" \\
+  --error="$DEPLOY_DIR/logs/slurm_bagel_%j.err" \\
+  --export=ALL,ROLE=bagel,MODEL_NAME=bagel-7b "$DEPLOY_DIR/split_model.slurm")"
+if ! THINK_JOB="$(sbatch --parsable --job-name=mm-think-{params.deployment_id[:16]} \\
+  --output="$DEPLOY_DIR/logs/slurm_thinkmorph_%j.out" \\
+  --error="$DEPLOY_DIR/logs/slurm_thinkmorph_%j.err" \\
+  --export=ALL,ROLE=thinkmorph,MODEL_NAME=thinkmorph-7b "$DEPLOY_DIR/split_model.slurm")"; then
+  scancel "$BAGEL_JOB" 2>/dev/null || true
+  exit 36
+fi
+printf '%s,%s\\n' "$BAGEL_JOB" "$THINK_JOB" > "$DEPLOY_DIR/job_id"
+printf 'BAGEL_JOB=%s\\nTHINKMORPH_JOB=%s\\n' "$BAGEL_JOB" "$THINK_JOB" \\
+  > "$DEPLOY_DIR/job_ids.env"
+echo "[delta-split] BAGEL job $BAGEL_JOB submitted"
+echo "[delta-split] ThinkMorph job $THINK_JOB submitted"'''
+        submitted_jobs = "$BAGEL_JOB,$THINK_JOB"
+        wait_label = "delta-split"
 
     return rf"""#!/usr/bin/env bash
 set -euo pipefail
@@ -644,11 +755,23 @@ NAMED_URL={q(named_url)}
 API_KEY_B64={q(b64(params.api_key))}
 WORKER_KEY_B64={q(b64(params.worker_api_key))}
 CF_TOKEN_B64={q(b64(params.cf_tunnel_token))}
+REPLACE_EXISTING_SERVICES={replace_existing}
 
 accounts | grep -F "$ACCOUNT" >/dev/null || {{ echo "ERROR: account unavailable" >&2; exit 20; }}
 sinfo -h -p {partition} -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' || {{
   echo "ERROR: {partition} is unavailable" >&2; exit 23;
 }}
+
+if [[ "$REPLACE_EXISTING_SERVICES" == true ]]; then
+  mapfile -t OLD_SERVICE_JOBS < <(
+    squeue -h -u "$USER" -o '%i|%j' |
+      awk -F'|' '$2 ~ /^mm-(bagel-thinkmorph|bagel-|think-)/ {{print $1}}' | sort -u
+  )
+  if (( ${{#OLD_SERVICE_JOBS[@]}} )); then
+    echo "[delta-single] cancelling existing service jobs: ${{OLD_SERVICE_JOBS[*]}}"
+    scancel "${{OLD_SERVICE_JOBS[@]}}"
+  fi
+fi
 
 mkdir -p "$DEPLOY_DIR/logs" "$DEPLOY_DIR/secrets" "$DEPLOY_DIR/runtime" \
   "$DEPLOY_DIR/registry" "$OFFLOAD_ROOT"
@@ -682,7 +805,7 @@ fi
 
 cat > "$DEPLOY_DIR/metadata.env" <<METADATA
 DEPLOYMENT_ID=$DEPLOY_ID
-MODELS=bagel-7b,thinkmorph-7b
+MODELS={models_csv}
 GPU_TYPE={params.gpu_type}
 GPU_PARTITION={partition}
 GPU_COUNT={params.gpu_count}
@@ -788,36 +911,7 @@ printf 'JOB_ID=%s\nNODE=%s\nURLS=%s\n' "$SLURM_JOB_ID" "$NODE_HOST" \
 mv -f "$TMP_REGISTRY" "$REGISTRY"
 echo "[delta-split] $ROLE workers READY on $NODE_HOST"
 
-if [[ "$ROLE" == thinkmorph ]]; then
-  wait -n "${{PIDS[@]}}"
-  exit 31
-fi
-
-# BAGEL owns the unified gateway and waits for the independently scheduled
-# ThinkMorph job to register two authenticated worker URLs.
-BAGEL_URLS="$(IFS=,; echo "${{URLS[*]}}")"
-THINK_REGISTRY="$DEPLOY_DIR/registry/thinkmorph.env"
-THINK_READY=false
-for _ in $(seq 1 11400); do
-  if [[ -s "$THINK_REGISTRY" ]]; then
-    source "$THINK_REGISTRY"
-    THINK_URLS="$URLS"
-    healthy=true
-    IFS=',' read -r -a candidates <<< "$THINK_URLS"
-    for url in "${{candidates[@]}}"; do
-      curl -fsS -H "Authorization: Bearer $DELTA_WORKER_API_KEY" \
-        "$url/health" >/dev/null 2>&1 || healthy=false
-    done
-    if [[ "$healthy" == true ]]; then
-      THINK_READY=true
-      break
-    fi
-  fi
-  sleep 15
-done
-[[ "$THINK_READY" == true ]] || {{ echo "ThinkMorph did not become ready" >&2; exit 32; }}
-export BAGEL_WORKER_URLS="$BAGEL_URLS"
-export THINKMORPH_WORKER_URLS="$THINK_URLS"
+{gateway_setup}
 GATEWAY_PORT=$((PORT_BASE + 4))
 export GATEWAY_PORT
 "$ENV_DIR/bin/python" "$DEPLOY_DIR/runtime/gateway.py" \
@@ -856,26 +950,7 @@ case "$EXPOSURE" in
   *) exit 34 ;;
 esac
 
-# Treat a sustained loss of the remote ThinkMorph workers as a deployment
-# failure so Slurm and the local state do not report a misleading READY API.
-(
-  failures=0
-  IFS=',' read -r -a remote_workers <<< "$THINKMORPH_WORKER_URLS"
-  while sleep 15; do
-    healthy=true
-    for url in "${{remote_workers[@]}}"; do
-      curl -fsS -H "Authorization: Bearer $DELTA_WORKER_API_KEY" \
-        "$url/health" >/dev/null 2>&1 || healthy=false
-    done
-    if [[ "$healthy" == true ]]; then
-      failures=0
-    else
-      failures=$((failures + 1))
-      [[ "$failures" -lt 4 ]] || exit 41
-    fi
-  done
-) &
-PIDS+=("$!")
+{remote_monitor}
 
 printf '%s\n' "$ENDPOINT" > "$DEPLOY_DIR/endpoint"
 echo READY > "$DEPLOY_DIR/state"
@@ -885,35 +960,20 @@ exit 35
 SPLIT_JOB
 chmod 700 "$DEPLOY_DIR/split_model.slurm"
 
-BAGEL_JOB="$(sbatch --parsable --job-name=mm-bagel-{params.deployment_id[:16]} \
-  --output="$DEPLOY_DIR/logs/slurm_bagel_%j.out" \
-  --error="$DEPLOY_DIR/logs/slurm_bagel_%j.err" \
-  --export=ALL,ROLE=bagel,MODEL_NAME=bagel-7b "$DEPLOY_DIR/split_model.slurm")"
-if ! THINK_JOB="$(sbatch --parsable --job-name=mm-think-{params.deployment_id[:16]} \
-  --output="$DEPLOY_DIR/logs/slurm_thinkmorph_%j.out" \
-  --error="$DEPLOY_DIR/logs/slurm_thinkmorph_%j.err" \
-  --export=ALL,ROLE=thinkmorph,MODEL_NAME=thinkmorph-7b "$DEPLOY_DIR/split_model.slurm")"; then
-  scancel "$BAGEL_JOB" 2>/dev/null || true
-  exit 36
-fi
-printf '%s,%s\n' "$BAGEL_JOB" "$THINK_JOB" > "$DEPLOY_DIR/job_id"
-printf 'BAGEL_JOB=%s\nTHINKMORPH_JOB=%s\n' "$BAGEL_JOB" "$THINK_JOB" \
-  > "$DEPLOY_DIR/job_ids.env"
-echo "[delta-split] BAGEL job $BAGEL_JOB submitted"
-echo "[delta-split] ThinkMorph job $THINK_JOB submitted"
+{submit_jobs}
 
 if [[ {str(params.detach).lower()} == true ]]; then
-  echo "DELTA_LLM_RESULT|$DEPLOY_ID|$BAGEL_JOB,$THINK_JOB|SUBMITTED|-|-|$DEPLOY_DIR"
+  echo "DELTA_LLM_RESULT|$DEPLOY_ID|{submitted_jobs}|SUBMITTED|-|-|$DEPLOY_DIR"
   exit 0
 fi
 for _ in $(seq 1 12000); do
   STATE="$(cat "$DEPLOY_DIR/state" 2>/dev/null || true)"
   if [[ "$STATE" == READY && -s "$DEPLOY_DIR/endpoint" ]]; then
     ENDPOINT="$(< "$DEPLOY_DIR/endpoint")"
-    echo "DELTA_LLM_RESULT|$DEPLOY_ID|$BAGEL_JOB,$THINK_JOB|READY|$ENDPOINT|-|$DEPLOY_DIR"
+    echo "DELTA_LLM_RESULT|$DEPLOY_ID|{submitted_jobs}|READY|$ENDPOINT|-|$DEPLOY_DIR"
     exit 0
   fi
-  squeue -h -j "$BAGEL_JOB,$THINK_JOB" -o '[delta-split] %i %T: %R'
+  squeue -h -j "{submitted_jobs}" -o '[{wait_label}] %i %T: %R'
   sleep 15
 done
 exit 37

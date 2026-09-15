@@ -70,6 +70,16 @@ macOS/Linux：
 
 H200-0承载两个BAGEL副本，H200-1承载两个ThinkMorph副本；每张卡约55GiB模型权重，141GiB显存足够保留长上下文和KV Cache余量。
 
+如果只需要一个模型，可以只提交一个单卡H200作业。该作业会独立启动网关、生成自己的Base URL和API Key，不会等待另一个模型：
+
+```powershell
+.\run.ps1 --username your_ncsa_username deploy `
+  --model bagel-7b --gpu-type h200 --gpus 1 --hours 47.5 `
+  --exposure cloudflare-quick --acknowledge-external-tunnel --detach
+```
+
+单卡H200作业申请12个CPU核心和240GB主机内存，运行47.5小时约预留142.5 weighted GPU-hours。把`--model`改成`thinkmorph-7b`可单独部署ThinkMorph。
+
 如果双卡同时可用导致预计排队较久，可以把同样的两张H200拆成两个独立的单卡作业：
 
 ```powershell

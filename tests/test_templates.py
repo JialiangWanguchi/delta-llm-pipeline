@@ -124,6 +124,7 @@ def test_two_h200_layout_runs_two_replicas_per_model_on_one_gpu_each() -> None:
     script = render_deploy_script(Config(), make_params(gpu_type="h200", gpu_count=2))
     assert "#SBATCH --partition=gpuH200x8" in script
     assert "#SBATCH --gpus-per-node=2" in script
+    assert "#SBATCH --cpus-per-task=24" in script
     assert "GPU_TYPE=h200" in script
     assert "GPUS_PER_MODEL=$((GPU_COUNT / 2))" in script
     assert 'BAGEL_CUDA="${CUDA_IDS[$MODEL_GPU_OFFSET]}"' in script
@@ -150,6 +151,30 @@ def test_split_h200_layout_submits_two_authenticated_single_gpu_jobs() -> None:
     assert "failures=$((failures + 1))" in script
     assert "slurm_bagel_%j.err" in script
     assert "slurm_thinkmorph_%j.err" in script
+    bash = shutil.which("bash")
+    if bash:
+        result = subprocess.run(
+            [bash, "-n"], input=script.encode(), capture_output=True, check=False
+        )
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+
+def test_single_bagel_h200_submits_one_job_and_starts_its_own_gateway() -> None:
+    params = replace(
+        make_params(exposure="cloudflare-quick", gpu_type="h200", gpu_count=1),
+        models=("bagel-7b",),
+    )
+    script = render_split_deploy_script(Config(), params)
+    assert script.count("sbatch --parsable") == 1
+    assert "#SBATCH --partition=gpuH200x8" in script
+    assert "#SBATCH --gpus-per-node=1" in script
+    assert "#SBATCH --cpus-per-task=12" in script
+    assert "#SBATCH --mem=240g" in script
+    assert "MODELS=bagel-7b" in script
+    assert "ROLE=bagel,MODEL_NAME=bagel-7b" in script
+    assert 'export DELTA_ENABLED_MODELS="$MODEL_NAME"' in script
+    assert "ThinkMorph did not become ready" not in script
+    assert "ROLE=thinkmorph,MODEL_NAME=thinkmorph-7b" not in script
     bash = shutil.which("bash")
     if bash:
         result = subprocess.run(

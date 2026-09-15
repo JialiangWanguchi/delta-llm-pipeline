@@ -45,7 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("doctor", help="Check Delta account, A100 queue, storage, and network")
     sub.add_parser("setup-status", help="Read shared installer job, files, and recent setup logs")
 
-    deploy = sub.add_parser("deploy", help="Deploy both models through one SSH+Duo login")
+    deploy = sub.add_parser("deploy", help="Deploy one or both models through one SSH+Duo login")
+    deploy.add_argument(
+        "--model",
+        choices=("both", "bagel-7b", "thinkmorph-7b"),
+        default="both",
+        help="Deploy both bundled models or just one model",
+    )
     deploy.add_argument(
         "--gpu-type",
         choices=("a100", "h200"),
@@ -55,9 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument(
         "--gpus",
         type=int,
-        choices=(2, 4),
+        choices=(1, 2, 4),
         default=4,
-        help="Use 4 with A100 or 2 with H200",
+        help="Both models: 4 A100 or 2 H200; one model: 2 A100 or 1 H200",
     )
     deploy.add_argument("--hours", type=float, help="Wall time; maximum 48")
     deploy.add_argument("--exposure", choices=EXPOSURE_MODES)
@@ -116,17 +122,27 @@ def print_catalog() -> None:
 
 
 def collect_deploy_params(args: argparse.Namespace, config: Config, username: str) -> DeployParams:
-    ok, reason = validate_gpu_layout(args.gpu_type, args.gpus)
-    if not ok:
-        raise ValueError(reason)
-    if args.split_jobs and (args.gpu_type, args.gpus) not in {
-        ("a100", 4),
-        ("h200", 2),
-    }:
-        raise ValueError(
-            "--split-jobs requires either 4 A100s (2 per model job) "
-            "or 2 H200s (1 per model job)"
-        )
+    models = tuple(MODEL_SPECS) if args.model == "both" else (args.model,)
+    if len(models) == 1:
+        required = 2 if args.gpu_type == "a100" else 1
+        if args.gpus != required:
+            raise ValueError(
+                f"A single {args.gpu_type.upper()} model requires --gpus {required}"
+            )
+        if args.split_jobs:
+            raise ValueError("--split-jobs is only used when deploying both models")
+    else:
+        ok, reason = validate_gpu_layout(args.gpu_type, args.gpus)
+        if not ok:
+            raise ValueError(reason)
+        if args.split_jobs and (args.gpu_type, args.gpus) not in {
+            ("a100", 4),
+            ("h200", 2),
+        }:
+            raise ValueError(
+                "--split-jobs requires either 4 A100s (2 per model job) "
+                "or 2 H200s (1 per model job)"
+            )
     hours = args.hours if args.hours is not None else config.default_hours
     if not 0 < hours <= 48:
         raise ValueError("Duration must be greater than 0 and no more than 48 hours")
@@ -160,22 +176,31 @@ def collect_deploy_params(args: argparse.Namespace, config: Config, username: st
         recover_stalled_setup=bool(args.recover_stalled_setup),
         replace_existing_services=bool(args.replace_existing_services),
         split_jobs=bool(args.split_jobs),
+        models=models,
     )
 
 
 def print_plan(params: DeployParams) -> None:
-    _, layout = validate_gpu_layout(params.gpu_type, params.gpu_count)
+    if len(params.models) == 1:
+        layout = (
+            f"{params.models[0]}: two replicas on "
+            f"{params.gpu_count}×{params.gpu_type.upper()}"
+        )
+    else:
+        _, layout = validate_gpu_layout(params.gpu_type, params.gpu_count)
     gpu_spec = GPU_SPECS[params.gpu_type]
     estimate = estimate_weighted_gpu_hours(
         params.gpu_count, params.hours, params.gpu_type
     )
-    print("\nDual-model deployment plan")
+    print("\nDeployment plan")
     print(f"  ID:          {params.deployment_id}")
-    print("  Models:      bagel-7b, thinkmorph-7b")
+    print(f"  Models:      {', '.join(params.models)}")
     print(f"  Partition:   {gpu_spec.partition}")
     print(f"  GPUs:        {params.gpu_count} x {gpu_spec.label}")
     print(f"  Layout:      {layout}")
-    if params.split_jobs:
+    if len(params.models) == 1:
+        scheduling = "one independent model job"
+    elif params.split_jobs:
         per_job = 2 if params.gpu_type == "a100" else 1
         scheduling = f"two independent {per_job}-GPU jobs"
     else:
@@ -198,7 +223,7 @@ def run_deploy(args: argparse.Namespace, config: Config) -> int:
     print("\nEnter the NCSA password and approve Duo once.")
     script = (
         render_split_deploy_script(config, params)
-        if params.split_jobs
+        if params.split_jobs or len(params.models) == 1
         else render_deploy_script(config, params)
     )
     result = SSHRunner(username, config.login_host).run_script(script)
@@ -211,12 +236,16 @@ def run_deploy(args: argparse.Namespace, config: Config) -> int:
         "state": result.state,
         "endpoint": result.endpoint,
         "expires_at": result.expires_at,
-        "models": list(MODEL_SPECS),
+        "models": list(params.models),
         "gpu": params.gpu_type,
         "gpu_count": params.gpu_count,
         "gpu_layout": {
-            "bagel-7b": [0, 0] if params.gpu_type == "h200" else [0, 1],
-            "thinkmorph-7b": [1, 1] if params.gpu_type == "h200" else [2, 3],
+            model: (
+                [index, index]
+                if params.gpu_type == "h200"
+                else [index * 2, index * 2 + 1]
+            )
+            for index, model in enumerate(params.models)
         },
         "split_jobs": params.split_jobs,
         "api_key": params.api_key,
@@ -227,15 +256,15 @@ def run_deploy(args: argparse.Namespace, config: Config) -> int:
         json.dumps(state, ensure_ascii=False, indent=2) + "\n",
     )
     if result.state == "SUBMITTED":
-        print("\nDual-model deployment submitted")
+        print("\nDeployment submitted")
     else:
-        print("\nDual-model API created")
+        print("\nAPI created")
     print(f"  Deployment: {result.deployment_id}")
     print(f"  Job:        {result.job_id}")
     print(f"  State:      {result.state}")
     print(f"  Base URL:   {result.endpoint}")
     print(f"  API Key:    {params.api_key}")
-    print(f"  Models:     {', '.join(MODEL_SPECS)}")
+    print(f"  Models:     {', '.join(params.models)}")
     print(f"  Expires:    {result.expires_at}")
     print(f"  Local state: {state_path}")
     if result.state == "SUBMITTED":

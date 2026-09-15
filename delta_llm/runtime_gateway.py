@@ -34,7 +34,7 @@ def worker_urls(plural_name: str, singular_name: str, default: str) -> list[str]
     return urls
 
 
-WORKERS = {
+ALL_WORKERS = {
     "bagel-7b": worker_urls(
         "BAGEL_WORKER_URLS", "BAGEL_WORKER_URL", "http://127.0.0.1:8101"
     ),
@@ -44,6 +44,15 @@ WORKERS = {
         "http://127.0.0.1:8102",
     ),
 }
+enabled_models_raw = os.environ.get("DELTA_ENABLED_MODELS", "").strip()
+if enabled_models_raw:
+    enabled_models = [item.strip() for item in enabled_models_raw.split(",") if item.strip()]
+    unknown_models = sorted(set(enabled_models) - set(ALL_WORKERS))
+    if unknown_models:
+        raise RuntimeError(f"Unknown DELTA_ENABLED_MODELS entries: {', '.join(unknown_models)}")
+    WORKERS = {model: ALL_WORKERS[model] for model in enabled_models}
+else:
+    WORKERS = ALL_WORKERS
 REQUEST_TIMEOUT = int(os.environ.get("WORKER_TIMEOUT_SECONDS", "3600"))
 JOB_TTL_SECONDS = int(os.environ.get("JOB_TTL_SECONDS", "7200"))
 MAX_JOBS = int(os.environ.get("MAX_JOBS", "500"))
