@@ -28,6 +28,7 @@ from .templates import (
     render_split_deploy_script,
     render_status_script,
     render_stop_script,
+    render_vllm_deploy_script,
 )
 
 EXPOSURE_MODES = ("none", "cloudflare-quick", "cloudflare-named")
@@ -51,6 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("both", "bagel-7b", "thinkmorph-7b"),
         default="both",
         help="Deploy both bundled models or just one model",
+    )
+    deploy.add_argument(
+        "--engine",
+        choices=("native", "vllm"),
+        default="native",
+        help="Inference engine; vllm currently requires BAGEL on one H200",
     )
     deploy.add_argument(
         "--gpu-type",
@@ -123,6 +130,13 @@ def print_catalog() -> None:
 
 def collect_deploy_params(args: argparse.Namespace, config: Config, username: str) -> DeployParams:
     models = tuple(MODEL_SPECS) if args.model == "both" else (args.model,)
+    if args.engine == "vllm":
+        if models != ("bagel-7b",):
+            raise ValueError("--engine vllm currently requires --model bagel-7b")
+        if (args.gpu_type, args.gpus) != ("h200", 1):
+            raise ValueError("--engine vllm currently requires --gpu-type h200 --gpus 1")
+        if args.split_jobs:
+            raise ValueError("--split-jobs is not used for a single vLLM BAGEL job")
     if len(models) == 1:
         required = 2 if args.gpu_type == "a100" else 1
         if args.gpus != required:
@@ -177,11 +191,14 @@ def collect_deploy_params(args: argparse.Namespace, config: Config, username: st
         replace_existing_services=bool(args.replace_existing_services),
         split_jobs=bool(args.split_jobs),
         models=models,
+        engine=args.engine,
     )
 
 
 def print_plan(params: DeployParams) -> None:
-    if len(params.models) == 1:
+    if params.engine == "vllm":
+        layout = "bagel-7b: one vLLM engine on one H200"
+    elif len(params.models) == 1:
         layout = (
             f"{params.models[0]}: two replicas on "
             f"{params.gpu_count}×{params.gpu_type.upper()}"
@@ -195,6 +212,7 @@ def print_plan(params: DeployParams) -> None:
     print("\nDeployment plan")
     print(f"  ID:          {params.deployment_id}")
     print(f"  Models:      {', '.join(params.models)}")
+    print(f"  Engine:      {params.engine}")
     print(f"  Partition:   {gpu_spec.partition}")
     print(f"  GPUs:        {params.gpu_count} x {gpu_spec.label}")
     print(f"  Layout:      {layout}")
@@ -221,11 +239,12 @@ def run_deploy(args: argparse.Namespace, config: Config) -> int:
 
     ensure_interactive_terminal()
     print("\nEnter the NCSA password and approve Duo once.")
-    script = (
-        render_split_deploy_script(config, params)
-        if params.split_jobs or len(params.models) == 1
-        else render_deploy_script(config, params)
-    )
+    if params.engine == "vllm":
+        script = render_vllm_deploy_script(config, params)
+    elif params.split_jobs or len(params.models) == 1:
+        script = render_split_deploy_script(config, params)
+    else:
+        script = render_deploy_script(config, params)
     result = SSHRunner(username, config.login_host).run_script(script)
     if result is None:
         raise RuntimeError("Remote deployment returned no structured result")
@@ -241,12 +260,15 @@ def run_deploy(args: argparse.Namespace, config: Config) -> int:
         "gpu_count": params.gpu_count,
         "gpu_layout": {
             model: (
-                [index, index]
+                [index]
+                if params.engine == "vllm"
+                else [index, index]
                 if params.gpu_type == "h200"
                 else [index * 2, index * 2 + 1]
             )
             for index, model in enumerate(params.models)
         },
+        "engine": params.engine,
         "split_jobs": params.split_jobs,
         "api_key": params.api_key,
         "remote_dir": result.remote_dir,

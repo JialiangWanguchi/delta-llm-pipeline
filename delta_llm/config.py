@@ -23,6 +23,7 @@ class Config:
     transformers_version: str = "4.49.0"
     flash_attn_version: str = "2.5.8"
     cuda_wheel: str = "cu124"
+    vllm_version: str = "0.20.2"
     bagel_commit: str = "a2fa77dd8caeefc41e6607ae0ec17408d3f4ee9f"
     thinkmorph_commit: str = "c1a48adfa212259c8ad79dfd9d05d87c27340cef"
     shared_root: str = "/projects/bhsz/delta-llm/shared"
@@ -61,6 +62,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         transformers_version=str(runtime.get("transformers_version", Config.transformers_version)),
         flash_attn_version=str(runtime.get("flash_attn_version", Config.flash_attn_version)),
         cuda_wheel=str(runtime.get("cuda_wheel", Config.cuda_wheel)),
+        vllm_version=str(runtime.get("vllm_version", Config.vllm_version)),
         bagel_commit=str(runtime.get("bagel_commit", Config.bagel_commit)),
         thinkmorph_commit=str(runtime.get("thinkmorph_commit", Config.thinkmorph_commit)),
         shared_root=str(runtime.get("shared_root", Config.shared_root)).rstrip("/"),

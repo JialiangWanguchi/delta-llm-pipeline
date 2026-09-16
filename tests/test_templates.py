@@ -14,6 +14,7 @@ from delta_llm.templates import (
     render_split_deploy_script,
     render_status_script,
     render_stop_script,
+    render_vllm_deploy_script,
 )
 
 
@@ -175,6 +176,37 @@ def test_single_bagel_h200_submits_one_job_and_starts_its_own_gateway() -> None:
     assert 'export DELTA_ENABLED_MODELS="$MODEL_NAME"' in script
     assert "ThinkMorph did not become ready" not in script
     assert "ROLE=thinkmorph,MODEL_NAME=thinkmorph-7b" not in script
+    bash = shutil.which("bash")
+    if bash:
+        result = subprocess.run(
+            [bash, "-n"], input=script.encode(), capture_output=True, check=False
+        )
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+
+def test_vllm_bagel_h200_script_is_authenticated_pinned_and_valid() -> None:
+    params = replace(
+        make_params(exposure="cloudflare-quick", gpu_type="h200", gpu_count=1),
+        models=("bagel-7b",),
+        engine="vllm",
+    )
+    script = render_vllm_deploy_script(Config(), params)
+    assert "plain-secret-must-not-appear" not in script
+    assert "internal-secret-must-not-appear" not in script
+    assert "#SBATCH --partition=gpuH200x8" in script
+    assert "#SBATCH --gpus-per-node=1" in script
+    assert "#SBATCH --cpus-per-task=12" in script
+    assert "#SBATCH --mem=240g" in script
+    assert "INFERENCE_ENGINE=vllm" in script
+    assert "VLLM_VERSION=0.20.2" in script
+    assert '"vllm==0.20.2"' in script
+    assert '"$ENV_DIR/bin/vllm" serve "$BAGEL_MODEL"' in script
+    assert "--served-model-name bagel-7b" in script
+    assert "--limit-mm-per-prompt '{\"image\": 24}'" in script
+    assert 'h["engine"]=="vllm"' in script
+    assert "vllm_proxy:app" in script
+    assert "runtime/worker.py" not in script
+    assert script.count("sbatch --parsable") == 1
     bash = shutil.which("bash")
     if bash:
         result = subprocess.run(

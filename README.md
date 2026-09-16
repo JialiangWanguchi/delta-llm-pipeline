@@ -80,6 +80,18 @@ H200-0承载两个BAGEL副本，H200-1承载两个ThinkMorph副本；每张卡�
 
 单卡H200作业申请12个CPU核心和240GB主机内存，运行47.5小时约预留142.5 weighted GPU-hours。把`--model`改成`thinkmorph-7b`可单独部署ThinkMorph。
 
+### vLLM BAGEL（新部署推荐）
+
+需要导师要求的vLLM框架时，显式指定`--engine vllm`。当前经过约束的vLLM布局是一个BAGEL模型使用一张H200：
+
+```powershell
+.\run.ps1 --username your_ncsa_username deploy `
+  --engine vllm --model bagel-7b --gpu-type h200 --gpus 1 --hours 40 `
+  --exposure cloudflare-quick --acknowledge-external-tunnel --detach
+```
+
+该路径固定安装并报告vLLM版本，启动官方OpenAI兼容服务，再通过只监听本机的认证网关暴露API。网关保留消息中`text`与`image_url`内容项的原始顺序，最多允许24张data URL图片；`/health`返回`engine=vllm`和实际版本，便于证明运行中的服务确实使用vLLM。当前vLLM路径仅支持BAGEL文字输出，不支持ThinkMorph或图片生成。
+
 如果双卡同时可用导致预计排队较久，可以把同样的两张H200拆成两个独立的单卡作业：
 
 ```powershell

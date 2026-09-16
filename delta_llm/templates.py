@@ -44,6 +44,7 @@ class DeployParams:
     replace_existing_services: bool
     split_jobs: bool
     models: tuple[str, ...] = ("bagel-7b", "thinkmorph-7b")
+    engine: str = "native"
 
 
 def render_deploy_script(config: Config, params: DeployParams) -> str:
@@ -980,6 +981,286 @@ exit 37
 """
 
 
+def render_vllm_deploy_script(config: Config, params: DeployParams) -> str:
+    if params.engine != "vllm":
+        raise ValueError("render_vllm_deploy_script requires engine=vllm")
+    if params.models != ("bagel-7b",):
+        raise ValueError("The vLLM deployment path currently supports BAGEL only")
+    if (params.gpu_type, params.gpu_count) != ("h200", 1):
+        raise ValueError("The validated vLLM layout requires 1×H200")
+
+    user_root = f"{config.project_root}/{params.username}/delta-llm"
+    deploy_dir = f"{user_root}/deployments/{params.deployment_id}"
+    bagel_model = f"{config.shared_root}/models/BAGEL-7B-MoT"
+    cloudflared = f"{config.shared_root}/bin/cloudflared"
+    env_dir = (
+        f"{config.runtime_root}/envs/"
+        f"vllm-py{config.python_version}-{config.vllm_version}"
+    )
+    install_lock = f"{env_dir}.installing"
+    slurm_time = hours_to_slurm(params.hours)
+    named_url = config.named_public_url if params.exposure == "cloudflare-named" else ""
+    proxy_b64 = b64(runtime_source("runtime_vllm_proxy.py"))
+    replace_existing = str(params.replace_existing_services).lower()
+
+    return rf"""#!/usr/bin/env bash
+set -euo pipefail
+umask 007
+
+ACCOUNT={q(config.account)}
+DEPLOY_ID={q(params.deployment_id)}
+DEPLOY_DIR={q(deploy_dir)}
+ENV_DIR={q(env_dir)}
+INSTALL_LOCK={q(install_lock)}
+BAGEL_MODEL={q(bagel_model)}
+CLOUDFLARED={q(cloudflared)}
+EXPOSURE={q(params.exposure)}
+NAMED_URL={q(named_url)}
+API_KEY_B64={q(b64(params.api_key))}
+CF_TOKEN_B64={q(b64(params.cf_tunnel_token))}
+REPLACE_EXISTING_SERVICES={replace_existing}
+
+accounts | grep -F "$ACCOUNT" >/dev/null || {{ echo "ERROR: account unavailable" >&2; exit 20; }}
+sinfo -h -p gpuH200x8 -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' || {{
+  echo "ERROR: gpuH200x8 is unavailable" >&2; exit 23;
+}}
+[[ -s "$BAGEL_MODEL/ema.safetensors" ]] || {{
+  echo "ERROR: BAGEL checkpoint is missing: $BAGEL_MODEL/ema.safetensors" >&2; exit 24;
+}}
+
+if [[ "$REPLACE_EXISTING_SERVICES" == true ]]; then
+  mapfile -t OLD_SERVICE_JOBS < <(
+    squeue -h -u "$USER" -o '%i|%j' |
+      awk -F'|' '$2 ~ /^mm-(vllm-bagel|bagel-|bagel-thinkmorph)/ {{print $1}}' | sort -u
+  )
+  if (( ${{#OLD_SERVICE_JOBS[@]}} )); then
+    echo "[delta-vllm] cancelling existing BAGEL service jobs: ${{OLD_SERVICE_JOBS[*]}}"
+    scancel "${{OLD_SERVICE_JOBS[@]}}"
+  fi
+fi
+
+mkdir -p "$DEPLOY_DIR/logs" "$DEPLOY_DIR/secrets" "$DEPLOY_DIR/runtime" \
+  "{config.runtime_root}/envs" "{config.runtime_root}/conda-pkgs" \
+  "{config.runtime_root}/pip-cache"
+chmod 700 "$DEPLOY_DIR" "$DEPLOY_DIR/secrets"
+printf '%s' "$API_KEY_B64" | base64 -d > "$DEPLOY_DIR/secrets/api_key"
+chmod 600 "$DEPLOY_DIR/secrets/api_key"
+if [[ -n "$CF_TOKEN_B64" ]]; then
+  printf '%s' "$CF_TOKEN_B64" | base64 -d > "$DEPLOY_DIR/secrets/cf_tunnel_token"
+  chmod 600 "$DEPLOY_DIR/secrets/cf_tunnel_token"
+fi
+printf '%s' {q(proxy_b64)} | base64 -d > "$DEPLOY_DIR/runtime/vllm_proxy.py"
+chmod 600 "$DEPLOY_DIR/runtime/vllm_proxy.py"
+
+if [[ "$EXPOSURE" == cloudflare-* && ! -x "$CLOUDFLARED" ]]; then
+  TMP_CF="$CLOUDFLARED.tmp.$$"
+  curl -fsSL {q(config.cloudflared_url)} -o "$TMP_CF"
+  chmod 750 "$TMP_CF"
+  mv -f "$TMP_CF" "$CLOUDFLARED"
+fi
+
+cat > "$DEPLOY_DIR/metadata.env" <<METADATA
+DEPLOYMENT_ID=$DEPLOY_ID
+MODELS=bagel-7b
+GPU_TYPE=h200
+GPU_PARTITION=gpuH200x8
+GPU_COUNT=1
+GPU_LAYOUT=single:bagel-vllm-1xh200
+INFERENCE_ENGINE=vllm
+VLLM_VERSION={config.vllm_version}
+MAX_IMAGES=24
+EXPOSURE=$EXPOSURE
+METADATA
+chmod 600 "$DEPLOY_DIR/metadata.env"
+echo SUBMITTED > "$DEPLOY_DIR/state"
+rm -f "$DEPLOY_DIR/endpoint"
+
+cat > "$DEPLOY_DIR/service.slurm" <<'SERVICE'
+#!/usr/bin/env bash
+#SBATCH --account={config.account}
+#SBATCH --partition=gpuH200x8
+#SBATCH --job-name=mm-vllm-bagel-{params.deployment_id[:12]}
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --gpus-per-node=1
+#SBATCH --mem=240g
+#SBATCH --time={slurm_time}
+#SBATCH --output={deploy_dir}/logs/slurm_%j.out
+#SBATCH --error={deploy_dir}/logs/slurm_%j.err
+
+set -euo pipefail
+umask 077
+module purge
+module load miniforge3-python
+module load cuda 2>/dev/null || true
+
+DEPLOY_DIR={q(deploy_dir)}
+ENV_DIR={q(env_dir)}
+INSTALL_LOCK={q(install_lock)}
+BAGEL_MODEL={q(bagel_model)}
+CLOUDFLARED={q(cloudflared)}
+EXPOSURE={q(params.exposure)}
+NAMED_URL={q(named_url)}
+export CONDA_PKGS_DIRS={q(f"{config.runtime_root}/conda-pkgs")}
+export PIP_CACHE_DIR={q(f"{config.runtime_root}/pip-cache")}
+export PYTHONUNBUFFERED=1
+
+env_ready() {{
+  [[ -x "$ENV_DIR/bin/vllm" ]] || return 1
+  [[ -f "$ENV_DIR/.delta-vllm-ready" ]] || return 1
+  [[ "$(< "$ENV_DIR/.delta-vllm-ready")" == "{config.vllm_version}" ]]
+}}
+
+if ! env_ready; then
+  if mkdir "$INSTALL_LOCK" 2>/dev/null; then
+    cleanup_install() {{
+      status=$?
+      rm -rf "$INSTALL_LOCK"
+      if [[ $status -ne 0 ]]; then rm -f "$ENV_DIR/.delta-vllm-ready"; fi
+      return $status
+    }}
+    trap cleanup_install EXIT
+    rm -rf "$ENV_DIR"
+    conda create -y --solver libmamba -p "$ENV_DIR" python={config.python_version} pip
+    "$ENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
+    "$ENV_DIR/bin/python" -m pip install \
+      "vllm=={config.vllm_version}" "httpx==0.28.1"
+    "$ENV_DIR/bin/python" - <<'PY'
+import importlib.metadata
+assert importlib.metadata.version("vllm") == "{config.vllm_version}"
+import torch
+assert torch.cuda.is_available()
+print("vLLM", importlib.metadata.version("vllm"), "torch", torch.__version__)
+PY
+    printf '%s\n' "{config.vllm_version}" > "$ENV_DIR/.delta-vllm-ready"
+    trap - EXIT
+    rm -rf "$INSTALL_LOCK"
+  else
+    for _ in $(seq 1 360); do
+      env_ready && break
+      [[ -d "$INSTALL_LOCK" ]] || break
+      sleep 10
+    done
+    env_ready || {{ echo "ERROR: shared vLLM environment is unavailable" >&2; exit 25; }}
+  fi
+fi
+
+# Refresh lightweight model metadata and remote-code files without re-downloading
+# checkpoint shards that already exist in the shared model directory.
+"$ENV_DIR/bin/python" - <<PY
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id="ByteDance-Seed/BAGEL-7B-MoT",
+    local_dir="$BAGEL_MODEL",
+    allow_patterns=["*.json", "*.py", "*.txt", "*.model"],
+)
+PY
+
+PIDS=()
+cleanup() {{
+  for pid in "${{PIDS[@]}}"; do kill "$pid" 2>/dev/null || true; done
+  current="$(cat "$DEPLOY_DIR/state" 2>/dev/null || true)"
+  [[ "$current" == STOPPED ]] || echo FAILED > "$DEPLOY_DIR/state"
+}}
+trap cleanup EXIT INT TERM
+
+PORT_BASE=$((20000 + SLURM_JOB_ID % 30000))
+VLLM_PORT=$PORT_BASE
+GATEWAY_PORT=$((PORT_BASE + 1))
+
+"$ENV_DIR/bin/vllm" serve "$BAGEL_MODEL" \
+  --served-model-name bagel-7b \
+  --host 127.0.0.1 --port "$VLLM_PORT" \
+  --trust-remote-code --dtype bfloat16 \
+  --max-model-len 28672 --max-num-seqs 2 \
+  --limit-mm-per-prompt '{{"image": 24}}' \
+  --gpu-memory-utilization 0.90 \
+  > "$DEPLOY_DIR/logs/vllm.log" 2>&1 &
+PIDS+=("$!")
+
+for _ in $(seq 1 180); do
+  curl -fsS "http://127.0.0.1:$VLLM_PORT/health" >/dev/null 2>&1 && break
+  kill -0 "${{PIDS[0]}}" 2>/dev/null || {{
+    tail -n 240 "$DEPLOY_DIR/logs/vllm.log" >&2
+    exit 30
+  }}
+  sleep 10
+done
+curl -fsS "http://127.0.0.1:$VLLM_PORT/health" >/dev/null
+
+export DELTA_MULTIMODAL_API_KEY="$(< "$DEPLOY_DIR/secrets/api_key")"
+export VLLM_UPSTREAM="http://127.0.0.1:$VLLM_PORT"
+export MAX_IMAGES=24
+export MAX_CONTENT_ITEMS=64
+"$ENV_DIR/bin/uvicorn" --app-dir "$DEPLOY_DIR/runtime" vllm_proxy:app \
+  --host 127.0.0.1 --port "$GATEWAY_PORT" \
+  > "$DEPLOY_DIR/logs/gateway.log" 2>&1 &
+PIDS+=("$!")
+
+for _ in $(seq 1 60); do
+  curl -fsS "http://127.0.0.1:$GATEWAY_PORT/health" | \
+    "$ENV_DIR/bin/python" -c 'import json,sys; h=json.load(sys.stdin); assert h["status"]=="ok" and h["engine"]=="vllm"' \
+    >/dev/null 2>&1 && break
+  sleep 2
+done
+curl -fsS "http://127.0.0.1:$GATEWAY_PORT/health" | \
+  "$ENV_DIR/bin/python" -c 'import json,sys; h=json.load(sys.stdin); assert h["status"]=="ok" and h["engine"]=="vllm"'
+
+case "$EXPOSURE" in
+  none) ENDPOINT="http://$(hostname -f):$GATEWAY_PORT/v1" ;;
+  cloudflare-quick)
+    "$CLOUDFLARED" tunnel --url "http://127.0.0.1:$GATEWAY_PORT" --no-autoupdate \
+      > "$DEPLOY_DIR/logs/cloudflared.log" 2>&1 &
+    PIDS+=("$!"); ENDPOINT=""
+    for _ in $(seq 1 60); do
+      ENDPOINT="$(grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' \
+        "$DEPLOY_DIR/logs/cloudflared.log" | head -n 1 || true)"
+      [[ -n "$ENDPOINT" ]] && break
+      sleep 2
+    done
+    [[ -n "$ENDPOINT" ]] || exit 31
+    ENDPOINT="$ENDPOINT/v1"
+    ;;
+  cloudflare-named)
+    CF_TOKEN="$(< "$DEPLOY_DIR/secrets/cf_tunnel_token")"
+    "$CLOUDFLARED" tunnel --no-autoupdate run --token "$CF_TOKEN" \
+      > "$DEPLOY_DIR/logs/cloudflared.log" 2>&1 &
+    PIDS+=("$!"); sleep 5; ENDPOINT="$NAMED_URL/v1"
+    ;;
+  *) exit 32 ;;
+esac
+
+printf '%s\n' "$ENDPOINT" > "$DEPLOY_DIR/endpoint"
+echo READY > "$DEPLOY_DIR/state"
+echo "[delta-vllm] BAGEL READY: $ENDPOINT"
+wait -n "${{PIDS[@]}}"
+exit 33
+SERVICE
+chmod 700 "$DEPLOY_DIR/service.slurm"
+
+JOB_ID="$(sbatch --parsable "$DEPLOY_DIR/service.slurm")"
+printf '%s\n' "$JOB_ID" > "$DEPLOY_DIR/job_id"
+echo "[delta-vllm] submitted job $JOB_ID"
+
+if [[ {str(params.detach).lower()} == true ]]; then
+  echo "DELTA_LLM_RESULT|$DEPLOY_ID|$JOB_ID|SUBMITTED|-|-|$DEPLOY_DIR"
+  exit 0
+fi
+for _ in $(seq 1 12000); do
+  STATE="$(cat "$DEPLOY_DIR/state" 2>/dev/null || true)"
+  if [[ "$STATE" == READY && -s "$DEPLOY_DIR/endpoint" ]]; then
+    ENDPOINT="$(< "$DEPLOY_DIR/endpoint")"
+    echo "DELTA_LLM_RESULT|$DEPLOY_ID|$JOB_ID|READY|$ENDPOINT|-|$DEPLOY_DIR"
+    exit 0
+  fi
+  squeue -h -j "$JOB_ID" -o '[delta-vllm] %i %T: %R'
+  sleep 15
+done
+exit 37
+"""
+
+
 def render_status_script(config: Config, username: str, deployment_id: str) -> str:
     deploy_dir = f"{config.project_root}/{username}/delta-llm/deployments/{deployment_id}"
     return rf"""#!/usr/bin/env bash
@@ -1010,7 +1291,9 @@ DEPLOY_DIR={q(deploy_dir)}
 [[ -d "$DEPLOY_DIR" ]] || {{ echo "Deployment not found" >&2; exit 40; }}
 for file in "$DEPLOY_DIR"/logs/bagel_*.log \
   "$DEPLOY_DIR"/logs/thinkmorph_*.log \
+  "$DEPLOY_DIR"/logs/vllm.log \
   "$DEPLOY_DIR"/logs/gateway.log "$DEPLOY_DIR"/logs/cloudflared.log \
+  "$DEPLOY_DIR"/logs/slurm_*.out "$DEPLOY_DIR"/logs/slurm_*.err \
   "$DEPLOY_DIR"/logs/slurm_bagel_*.out "$DEPLOY_DIR"/logs/slurm_bagel_*.err \
   "$DEPLOY_DIR"/logs/slurm_thinkmorph_*.out \
   "$DEPLOY_DIR"/logs/slurm_thinkmorph_*.err; do
