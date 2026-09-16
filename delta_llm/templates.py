@@ -984,14 +984,29 @@ exit 37
 def render_vllm_deploy_script(config: Config, params: DeployParams) -> str:
     if params.engine != "vllm":
         raise ValueError("render_vllm_deploy_script requires engine=vllm")
-    if params.models != ("bagel-7b",):
-        raise ValueError("The vLLM deployment path currently supports BAGEL only")
-    if (params.gpu_type, params.gpu_count) != ("h200", 1):
-        raise ValueError("The validated vLLM layout requires 1×H200")
+    if len(params.models) != 1 or params.models[0] not in {
+        "bagel-7b",
+        "thinkmorph-7b",
+    }:
+        raise ValueError("The vLLM deployment path requires one supported model")
+    if (params.gpu_type, params.gpu_count) not in {("h200", 1), ("a100", 2)}:
+        raise ValueError("The vLLM layout must be 1×H200 or 2×A100")
 
     user_root = f"{config.project_root}/{params.username}/delta-llm"
     deploy_dir = f"{user_root}/deployments/{params.deployment_id}"
     bagel_model = f"{config.shared_root}/models/BAGEL-7B-MoT"
+    thinkmorph_model = f"{config.shared_root}/models/ThinkMorph-7B"
+    model_name = params.models[0]
+    model_role = "bagel" if model_name == "bagel-7b" else "thinkmorph"
+    model_source = bagel_model if model_role == "bagel" else thinkmorph_model
+    checkpoint = (
+        f"{bagel_model}/ema.safetensors"
+        if model_role == "bagel"
+        else f"{thinkmorph_model}/model.safetensors"
+    )
+    gpu_spec = GPU_SPECS[params.gpu_type]
+    service_cpus = 12 if params.gpu_type == "h200" else 24
+    service_memory = "240g" if params.gpu_type == "h200" else "110g"
     cloudflared = f"{config.shared_root}/bin/cloudflared"
     env_dir = (
         f"{config.runtime_root}/envs/"
@@ -1013,6 +1028,9 @@ DEPLOY_DIR={q(deploy_dir)}
 ENV_DIR={q(env_dir)}
 INSTALL_LOCK={q(install_lock)}
 BAGEL_MODEL={q(bagel_model)}
+MODEL_SOURCE={q(model_source)}
+MODEL_NAME={q(model_name)}
+MODEL_ROLE={q(model_role)}
 CLOUDFLARED={q(cloudflared)}
 EXPOSURE={q(params.exposure)}
 NAMED_URL={q(named_url)}
@@ -1021,20 +1039,20 @@ CF_TOKEN_B64={q(b64(params.cf_tunnel_token))}
 REPLACE_EXISTING_SERVICES={replace_existing}
 
 accounts | grep -F "$ACCOUNT" >/dev/null || {{ echo "ERROR: account unavailable" >&2; exit 20; }}
-sinfo -h -p gpuH200x8 -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' || {{
-  echo "ERROR: gpuH200x8 is unavailable" >&2; exit 23;
+sinfo -h -p {gpu_spec.partition} -o '%T' | grep -Eq '^(idle|mix|alloc|comp|drain)' || {{
+  echo "ERROR: {gpu_spec.partition} is unavailable" >&2; exit 23;
 }}
-[[ -s "$BAGEL_MODEL/ema.safetensors" ]] || {{
-  echo "ERROR: BAGEL checkpoint is missing: $BAGEL_MODEL/ema.safetensors" >&2; exit 24;
+[[ -s {q(checkpoint)} ]] || {{
+  echo "ERROR: model checkpoint is missing: {checkpoint}" >&2; exit 24;
 }}
 
 if [[ "$REPLACE_EXISTING_SERVICES" == true ]]; then
   mapfile -t OLD_SERVICE_JOBS < <(
     squeue -h -u "$USER" -o '%i|%j' |
-      awk -F'|' '$2 ~ /^mm-(vllm-bagel|bagel-|bagel-thinkmorph)/ {{print $1}}' | sort -u
+      awk -F'|' '$2 ~ /^mm-(vllm-(bagel|thinkmorph)|bagel-|bagel-thinkmorph)/ {{print $1}}' | sort -u
   )
   if (( ${{#OLD_SERVICE_JOBS[@]}} )); then
-    echo "[delta-vllm] cancelling existing BAGEL service jobs: ${{OLD_SERVICE_JOBS[*]}}"
+    echo "[delta-vllm] cancelling existing multimodal service jobs: ${{OLD_SERVICE_JOBS[*]}}"
     scancel "${{OLD_SERVICE_JOBS[@]}}"
   fi
 fi
@@ -1061,11 +1079,11 @@ fi
 
 cat > "$DEPLOY_DIR/metadata.env" <<METADATA
 DEPLOYMENT_ID=$DEPLOY_ID
-MODELS=bagel-7b
-GPU_TYPE=h200
-GPU_PARTITION=gpuH200x8
-GPU_COUNT=1
-GPU_LAYOUT=single:bagel-vllm-1xh200
+MODELS=$MODEL_NAME
+GPU_TYPE={params.gpu_type}
+GPU_PARTITION={gpu_spec.partition}
+GPU_COUNT={params.gpu_count}
+GPU_LAYOUT=single:$MODEL_ROLE-vllm-{params.gpu_count}x{params.gpu_type}
 INFERENCE_ENGINE=vllm
 VLLM_VERSION={config.vllm_version}
 MAX_IMAGES=24
@@ -1078,13 +1096,13 @@ rm -f "$DEPLOY_DIR/endpoint"
 cat > "$DEPLOY_DIR/service.slurm" <<'SERVICE'
 #!/usr/bin/env bash
 #SBATCH --account={config.account}
-#SBATCH --partition=gpuH200x8
-#SBATCH --job-name=mm-vllm-bagel-{params.deployment_id[:12]}
+#SBATCH --partition={gpu_spec.partition}
+#SBATCH --job-name=mm-vllm-{model_role}-{params.deployment_id[-12:]}
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=12
-#SBATCH --gpus-per-node=1
-#SBATCH --mem=240g
+#SBATCH --cpus-per-task={service_cpus}
+#SBATCH --gpus-per-node={params.gpu_count}
+#SBATCH --mem={service_memory}
 #SBATCH --time={slurm_time}
 #SBATCH --output={deploy_dir}/logs/slurm_%j.out
 #SBATCH --error={deploy_dir}/logs/slurm_%j.err
@@ -1099,6 +1117,10 @@ DEPLOY_DIR={q(deploy_dir)}
 ENV_DIR={q(env_dir)}
 INSTALL_LOCK={q(install_lock)}
 BAGEL_MODEL={q(bagel_model)}
+MODEL_SOURCE={q(model_source)}
+MODEL_NAME={q(model_name)}
+MODEL_ROLE={q(model_role)}
+GPU_COUNT={params.gpu_count}
 CLOUDFLARED={q(cloudflared)}
 EXPOSURE={q(params.exposure)}
 NAMED_URL={q(named_url)}
@@ -1157,6 +1179,24 @@ snapshot_download(
 )
 PY
 
+SERVER_MODEL="$MODEL_SOURCE"
+if [[ "$MODEL_ROLE" == thinkmorph ]]; then
+  # ThinkMorph publishes BAGEL-compatible fine-tuned weights but its config.json
+  # does not declare BagelForConditionalGeneration. Build an isolated model view
+  # with the official BAGEL architecture metadata and ThinkMorph's own weights.
+  SERVER_MODEL="$DEPLOY_DIR/runtime/thinkmorph-vllm-model"
+  rm -rf "$SERVER_MODEL"
+  mkdir -p "$SERVER_MODEL"
+  for file in "$MODEL_SOURCE"/*; do
+    [[ -f "$file" ]] || continue
+    ln -s "$file" "$SERVER_MODEL/${{file##*/}}"
+  done
+  rm -f "$SERVER_MODEL/config.json" "$SERVER_MODEL/preprocessor_config.json" \
+    "$SERVER_MODEL/model.safetensors.index.json"
+  cp "$BAGEL_MODEL/config.json" "$SERVER_MODEL/config.json"
+  cp "$BAGEL_MODEL/preprocessor_config.json" "$SERVER_MODEL/preprocessor_config.json"
+fi
+
 PIDS=()
 cleanup() {{
   for pid in "${{PIDS[@]}}"; do kill "$pid" 2>/dev/null || true; done
@@ -1169,13 +1209,19 @@ PORT_BASE=$((20000 + SLURM_JOB_ID % 30000))
 VLLM_PORT=$PORT_BASE
 GATEWAY_PORT=$((PORT_BASE + 1))
 
-"$ENV_DIR/bin/vllm" serve "$BAGEL_MODEL" \
-  --served-model-name bagel-7b \
+PARALLEL_ARGS=()
+if (( GPU_COUNT == 2 )); then
+  PARALLEL_ARGS+=(--pipeline-parallel-size 2)
+fi
+
+"$ENV_DIR/bin/vllm" serve "$SERVER_MODEL" \
+  --served-model-name "$MODEL_NAME" \
   --host 127.0.0.1 --port "$VLLM_PORT" \
   --trust-remote-code --dtype bfloat16 \
   --max-model-len 28672 --max-num-seqs 2 \
   --limit-mm-per-prompt '{{"image": 24}}' \
   --gpu-memory-utilization 0.90 \
+  "${{PARALLEL_ARGS[@]}}" \
   > "$DEPLOY_DIR/logs/vllm.log" 2>&1 &
 PIDS+=("$!")
 
@@ -1191,6 +1237,7 @@ curl -fsS "http://127.0.0.1:$VLLM_PORT/health" >/dev/null
 
 export DELTA_MULTIMODAL_API_KEY="$(< "$DEPLOY_DIR/secrets/api_key")"
 export VLLM_UPSTREAM="http://127.0.0.1:$VLLM_PORT"
+export SERVED_MODEL_NAME="$MODEL_NAME"
 export MAX_IMAGES=24
 export MAX_CONTENT_ITEMS=64
 "$ENV_DIR/bin/uvicorn" --app-dir "$DEPLOY_DIR/runtime" vllm_proxy:app \
@@ -1233,7 +1280,7 @@ esac
 
 printf '%s\n' "$ENDPOINT" > "$DEPLOY_DIR/endpoint"
 echo READY > "$DEPLOY_DIR/state"
-echo "[delta-vllm] BAGEL READY: $ENDPOINT"
+echo "[delta-vllm] $MODEL_NAME READY: $ENDPOINT"
 wait -n "${{PIDS[@]}}"
 exit 33
 SERVICE

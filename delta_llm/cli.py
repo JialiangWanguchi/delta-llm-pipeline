@@ -57,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--engine",
         choices=("native", "vllm"),
         default="native",
-        help="Inference engine; vllm currently requires BAGEL on one H200",
+        help="Inference engine; vllm supports one BAGEL/ThinkMorph on 1 H200 or 2 A100s",
     )
     deploy.add_argument(
         "--gpu-type",
@@ -131,10 +131,13 @@ def print_catalog() -> None:
 def collect_deploy_params(args: argparse.Namespace, config: Config, username: str) -> DeployParams:
     models = tuple(MODEL_SPECS) if args.model == "both" else (args.model,)
     if args.engine == "vllm":
-        if models != ("bagel-7b",):
-            raise ValueError("--engine vllm currently requires --model bagel-7b")
-        if (args.gpu_type, args.gpus) != ("h200", 1):
-            raise ValueError("--engine vllm currently requires --gpu-type h200 --gpus 1")
+        if len(models) != 1:
+            raise ValueError("--engine vllm requires one model per job")
+        if (args.gpu_type, args.gpus) not in {("h200", 1), ("a100", 2)}:
+            raise ValueError(
+                "--engine vllm requires either --gpu-type h200 --gpus 1 "
+                "or --gpu-type a100 --gpus 2"
+            )
         if args.split_jobs:
             raise ValueError("--split-jobs is not used for a single vLLM BAGEL job")
     if len(models) == 1:
@@ -197,7 +200,8 @@ def collect_deploy_params(args: argparse.Namespace, config: Config, username: st
 
 def print_plan(params: DeployParams) -> None:
     if params.engine == "vllm":
-        layout = "bagel-7b: one vLLM engine on one H200"
+        parallel = "pipeline parallel ×2" if params.gpu_type == "a100" else "single GPU"
+        layout = f"{params.models[0]}: one vLLM engine ({parallel})"
     elif len(params.models) == 1:
         layout = (
             f"{params.models[0]}: two replicas on "

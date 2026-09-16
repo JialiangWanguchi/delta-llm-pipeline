@@ -200,13 +200,43 @@ def test_vllm_bagel_h200_script_is_authenticated_pinned_and_valid() -> None:
     assert "INFERENCE_ENGINE=vllm" in script
     assert "VLLM_VERSION=0.20.2" in script
     assert '"vllm==0.20.2"' in script
-    assert '"$ENV_DIR/bin/vllm" serve "$BAGEL_MODEL"' in script
-    assert "--served-model-name bagel-7b" in script
+    assert '"$ENV_DIR/bin/vllm" serve "$SERVER_MODEL"' in script
+    assert "MODEL_NAME=bagel-7b" in script
+    assert '--served-model-name "$MODEL_NAME"' in script
     assert "--limit-mm-per-prompt '{\"image\": 24}'" in script
     assert 'h["engine"]=="vllm"' in script
     assert "vllm_proxy:app" in script
     assert "runtime/worker.py" not in script
     assert script.count("sbatch --parsable") == 1
+    bash = shutil.which("bash")
+    if bash:
+        result = subprocess.run(
+            [bash, "-n"], input=script.encode(), capture_output=True, check=False
+        )
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+
+def test_vllm_thinkmorph_two_a100_script_uses_pipeline_parallel_model_view() -> None:
+    params = replace(
+        make_params(exposure="cloudflare-quick", gpu_type="a100", gpu_count=2),
+        models=("thinkmorph-7b",),
+        engine="vllm",
+    )
+    script = render_vllm_deploy_script(Config(), params)
+    assert "#SBATCH --partition=gpuA100x4" in script
+    assert "#SBATCH --gpus-per-node=2" in script
+    assert "#SBATCH --cpus-per-task=24" in script
+    assert "#SBATCH --mem=110g" in script
+    assert "MODELS=$MODEL_NAME" in script
+    assert "MODEL_NAME=thinkmorph-7b" in script
+    assert "MODEL_ROLE=thinkmorph" in script
+    assert "ThinkMorph-7B/model.safetensors" in script
+    assert "thinkmorph-vllm-model" in script
+    assert 'cp "$BAGEL_MODEL/config.json" "$SERVER_MODEL/config.json"' in script
+    assert 'rm -f "$SERVER_MODEL/config.json"' in script
+    assert "PARALLEL_ARGS+=(--pipeline-parallel-size 2)" in script
+    assert '--served-model-name "$MODEL_NAME"' in script
+    assert 'export SERVED_MODEL_NAME="$MODEL_NAME"' in script
     bash = shutil.which("bash")
     if bash:
         result = subprocess.run(

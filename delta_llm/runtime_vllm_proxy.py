@@ -14,8 +14,9 @@ MAX_REQUEST_BYTES = int(os.environ.get("MAX_REQUEST_BYTES", str(64 * 1024 * 1024
 MAX_IMAGES = int(os.environ.get("MAX_IMAGES", "24"))
 MAX_CONTENT_ITEMS = int(os.environ.get("MAX_CONTENT_ITEMS", "64"))
 REQUEST_TIMEOUT = float(os.environ.get("WORKER_TIMEOUT_SECONDS", "3600"))
+SERVED_MODEL = os.environ.get("SERVED_MODEL_NAME", "bagel-7b")
 
-app = FastAPI(title="Delta BAGEL vLLM API", version="1.0.0")
+app = FastAPI(title="Delta multimodal vLLM API", version="1.0.0")
 
 
 def authorize(authorization: str | None = Header(default=None)) -> None:
@@ -24,8 +25,8 @@ def authorize(authorization: str | None = Header(default=None)) -> None:
 
 
 def validate_chat_payload(payload: dict[str, Any]) -> None:
-    if payload.get("model") != "bagel-7b":
-        raise HTTPException(status_code=400, detail="Only bagel-7b is available")
+    if payload.get("model") != SERVED_MODEL:
+        raise HTTPException(status_code=400, detail=f"Only {SERVED_MODEL} is available")
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
         raise HTTPException(status_code=400, detail="messages must be a non-empty list")
@@ -99,7 +100,7 @@ async def health() -> dict[str, Any]:
         "status": "ok" if response.is_success else "degraded",
         "engine": "vllm",
         "vllm_version": importlib.metadata.version("vllm"),
-        "model": "bagel-7b",
+        "model": SERVED_MODEL,
         "max_images": MAX_IMAGES,
     }
 

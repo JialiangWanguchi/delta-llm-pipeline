@@ -82,7 +82,7 @@ H200-0承载两个BAGEL副本，H200-1承载两个ThinkMorph副本；每张卡�
 
 ### vLLM BAGEL（新部署推荐）
 
-需要导师要求的vLLM框架时，显式指定`--engine vllm`。当前经过约束的vLLM布局是一个BAGEL模型使用一张H200：
+需要导师要求的vLLM框架时，显式指定`--engine vllm`。每个vLLM作业只部署一个模型，支持`1×H200`或`2×A100`：
 
 ```powershell
 .\run.ps1 --username your_ncsa_username deploy `
@@ -90,7 +90,15 @@ H200-0承载两个BAGEL副本，H200-1承载两个ThinkMorph副本；每张卡�
   --exposure cloudflare-quick --acknowledge-external-tunnel --detach
 ```
 
-该路径固定安装并报告vLLM版本，启动官方OpenAI兼容服务，再通过只监听本机的认证网关暴露API。网关保留消息中`text`与`image_url`内容项的原始顺序，最多允许24张data URL图片；`/health`返回`engine=vllm`和实际版本，便于证明运行中的服务确实使用vLLM。当前vLLM路径仅支持BAGEL文字输出，不支持ThinkMorph或图片生成。
+ThinkMorph和双A100示例：
+
+```powershell
+.\run.ps1 --username your_ncsa_username deploy `
+  --engine vllm --model thinkmorph-7b --gpu-type a100 --gpus 2 --hours 40 `
+  --exposure cloudflare-quick --acknowledge-external-tunnel --detach
+```
+
+双A100使用vLLM pipeline parallel，把同一个模型分布到两张卡上。ThinkMorph是BAGEL微调权重；部署器会为其创建隔离的模型视图，组合官方BAGEL架构配置与ThinkMorph权重，不修改共享检查点。该路径固定安装并报告vLLM版本，启动官方OpenAI兼容服务，再通过只监听本机的认证网关暴露API。网关保留消息中`text`与`image_url`内容项的原始顺序，最多允许24张data URL图片；`/health`返回`engine=vllm`、实际版本和模型名，便于证明运行中的服务确实使用vLLM。vLLM路径只提供文字输出，不支持图片生成。
 
 如果双卡同时可用导致预计排队较久，可以把同样的两张H200拆成两个独立的单卡作业：
 
