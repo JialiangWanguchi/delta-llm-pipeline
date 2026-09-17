@@ -31,7 +31,7 @@ from .templates import (
     render_vllm_deploy_script,
 )
 
-EXPOSURE_MODES = ("none", "cloudflare-quick", "cloudflare-named")
+EXPOSURE_MODES = ("none", "tailscale", "cloudflare-quick", "cloudflare-named")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -171,6 +171,18 @@ def collect_deploy_params(args: argparse.Namespace, config: Config, username: st
         )
         if input("Type YES to continue: ").strip() != "YES":
             raise RuntimeError("External tunnel was not acknowledged")
+    if exposure == "tailscale" and args.engine != "vllm":
+        raise ValueError("--exposure tailscale currently requires --engine vllm")
+    tailscale_auth_key = ""
+    if exposure == "tailscale":
+        tailscale_auth_key = os.environ.get(
+            "TAILSCALE_AUTHKEY", os.environ.get("TS_AUTH_KEY", "")
+        )
+        if not tailscale_auth_key:
+            raise ValueError(
+                "Set TAILSCALE_AUTHKEY to a reusable, ephemeral, pre-approved "
+                "Tailscale auth key"
+            )
     cf_token = ""
     if exposure == "cloudflare-named":
         cf_token = os.environ.get("DELTA_LLM_CF_TUNNEL_TOKEN", "")
@@ -189,6 +201,7 @@ def collect_deploy_params(args: argparse.Namespace, config: Config, username: st
         exposure=exposure,
         hf_token=os.environ.get("HF_TOKEN", ""),
         cf_tunnel_token=cf_token,
+        tailscale_auth_key=tailscale_auth_key,
         detach=bool(args.detach),
         recover_stalled_setup=bool(args.recover_stalled_setup),
         replace_existing_services=bool(args.replace_existing_services),

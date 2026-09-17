@@ -17,6 +17,8 @@ bagel_commit = "abc123"
 runtime_root = "/work/nvme/example/runtime"
 [exposure]
 default_mode = "cloudflare-quick"
+tailscale_version = "1.99.0"
+tailscale_url = "https://example.invalid/tailscale.tgz"
 """,
         encoding="utf-8",
     )
@@ -28,3 +30,5 @@ default_mode = "cloudflare-quick"
     assert config.bagel_commit == "abc123"
     assert config.runtime_root == "/work/nvme/example/runtime"
     assert config.default_exposure == "cloudflare-quick"
+    assert config.tailscale_version == "1.99.0"
+    assert config.tailscale_url == "https://example.invalid/tailscale.tgz"

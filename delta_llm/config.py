@@ -33,6 +33,10 @@ class Config:
         "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
     )
     named_public_url: str = ""
+    tailscale_version: str = "1.102.4"
+    tailscale_url: str = (
+        "https://pkgs.tailscale.com/stable/tailscale_1.102.4_amd64.tgz"
+    )
 
 
 def default_config_path() -> Path:
@@ -70,4 +74,8 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         default_exposure=str(exposure.get("default_mode", Config.default_exposure)),
         cloudflared_url=str(exposure.get("cloudflared_url", Config.cloudflared_url)),
         named_public_url=str(exposure.get("named_public_url", "")).rstrip("/"),
+        tailscale_version=str(
+            exposure.get("tailscale_version", Config.tailscale_version)
+        ),
+        tailscale_url=str(exposure.get("tailscale_url", Config.tailscale_url)),
     )

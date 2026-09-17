@@ -21,9 +21,14 @@ shared_root = "/projects/bhsz/delta-llm/shared"
 runtime_root = "/work/nvme/bhsz/delta-llm/shared"
 
 [exposure]
-# none | cloudflare-quick | cloudflare-named
+# none | tailscale | cloudflare-quick | cloudflare-named
 default_mode = "none"
 cloudflared_url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
 
 # Only used by cloudflare-named. Keep the token in DELTA_LLM_CF_TUNNEL_TOKEN.
 named_public_url = ""
+
+# Tailscale runs rootlessly in userspace mode. For tailscale exposure, set a
+# reusable + ephemeral + pre-approved auth key in TAILSCALE_AUTHKEY.
+tailscale_version = "1.102.4"
+tailscale_url = "https://pkgs.tailscale.com/stable/tailscale_1.102.4_amd64.tgz"

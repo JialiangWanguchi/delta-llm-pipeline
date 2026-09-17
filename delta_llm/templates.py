@@ -39,6 +39,7 @@ class DeployParams:
     exposure: str
     hf_token: str
     cf_tunnel_token: str
+    tailscale_auth_key: str
     detach: bool
     recover_stalled_setup: bool
     replace_existing_services: bool
@@ -646,7 +647,6 @@ def render_split_deploy_script(config: Config, params: DeployParams) -> str:
     gateway_b64 = b64(runtime_source("runtime_gateway.py"))
     models_csv = ",".join(params.models)
     replace_existing = str(params.replace_existing_services).lower()
-
     if single_model:
         selected_model = params.models[0]
         selected_role = "bagel" if selected_model == "bagel-7b" else "thinkmorph"
@@ -1008,6 +1008,9 @@ def render_vllm_deploy_script(config: Config, params: DeployParams) -> str:
     service_cpus = 12 if params.gpu_type == "h200" else 24
     service_memory = "240g" if params.gpu_type == "h200" else "110g"
     cloudflared = f"{config.shared_root}/bin/cloudflared"
+    tailscale_dir = f"{config.shared_root}/bin/tailscale-{config.tailscale_version}"
+    tailscale = f"{tailscale_dir}/tailscale"
+    tailscaled = f"{tailscale_dir}/tailscaled"
     env_dir = (
         f"{config.runtime_root}/envs/"
         f"vllm-py{config.python_version}-{config.vllm_version}"
@@ -1017,6 +1020,11 @@ def render_vllm_deploy_script(config: Config, params: DeployParams) -> str:
     named_url = config.named_public_url if params.exposure == "cloudflare-named" else ""
     proxy_b64 = b64(runtime_source("runtime_vllm_proxy.py"))
     replace_existing = str(params.replace_existing_services).lower()
+    tailscale_hostname = (
+        f"delta-{model_role}-{params.gpu_type}-{params.deployment_id[-8:]}"
+        .lower()
+        .replace("_", "-")
+    )
 
     return rf"""#!/usr/bin/env bash
 set -euo pipefail
@@ -1032,10 +1040,14 @@ MODEL_SOURCE={q(model_source)}
 MODEL_NAME={q(model_name)}
 MODEL_ROLE={q(model_role)}
 CLOUDFLARED={q(cloudflared)}
+TAILSCALE_DIR={q(tailscale_dir)}
+TAILSCALE={q(tailscale)}
+TAILSCALED={q(tailscaled)}
 EXPOSURE={q(params.exposure)}
 NAMED_URL={q(named_url)}
 API_KEY_B64={q(b64(params.api_key))}
 CF_TOKEN_B64={q(b64(params.cf_tunnel_token))}
+TS_AUTHKEY_B64={q(b64(params.tailscale_auth_key))}
 REPLACE_EXISTING_SERVICES={replace_existing}
 
 accounts | grep -F "$ACCOUNT" >/dev/null || {{ echo "ERROR: account unavailable" >&2; exit 20; }}
@@ -1067,6 +1079,10 @@ if [[ -n "$CF_TOKEN_B64" ]]; then
   printf '%s' "$CF_TOKEN_B64" | base64 -d > "$DEPLOY_DIR/secrets/cf_tunnel_token"
   chmod 600 "$DEPLOY_DIR/secrets/cf_tunnel_token"
 fi
+if [[ -n "$TS_AUTHKEY_B64" ]]; then
+  printf '%s' "$TS_AUTHKEY_B64" | base64 -d > "$DEPLOY_DIR/secrets/tailscale_authkey"
+  chmod 600 "$DEPLOY_DIR/secrets/tailscale_authkey"
+fi
 printf '%s' {q(proxy_b64)} | base64 -d > "$DEPLOY_DIR/runtime/vllm_proxy.py"
 chmod 600 "$DEPLOY_DIR/runtime/vllm_proxy.py"
 
@@ -1075,6 +1091,43 @@ if [[ "$EXPOSURE" == cloudflare-* && ! -x "$CLOUDFLARED" ]]; then
   curl -fsSL {q(config.cloudflared_url)} -o "$TMP_CF"
   chmod 750 "$TMP_CF"
   mv -f "$TMP_CF" "$CLOUDFLARED"
+fi
+
+if [[ "$EXPOSURE" == tailscale && (! -x "$TAILSCALE" || ! -x "$TAILSCALED") ]]; then
+  TS_INSTALL_LOCK="$TAILSCALE_DIR.installing"
+  if mkdir "$TS_INSTALL_LOCK" 2>/dev/null; then
+    cleanup_ts_install() {{ rm -rf "$TS_INSTALL_LOCK"; }}
+    trap cleanup_ts_install EXIT
+    TS_ARCHIVE="$TS_INSTALL_LOCK/tailscale.tgz"
+    TS_CHECKSUM="$TS_INSTALL_LOCK/tailscale.tgz.sha256"
+    curl -fsSL {q(config.tailscale_url)} -o "$TS_ARCHIVE"
+    curl -fsSL {q(config.tailscale_url + '.sha256')} -o "$TS_CHECKSUM"
+    EXPECTED_SHA="$(awk '{{print $1}}' "$TS_CHECKSUM")"
+    ACTUAL_SHA="$(sha256sum "$TS_ARCHIVE" | awk '{{print $1}}')"
+    [[ -n "$EXPECTED_SHA" && "$ACTUAL_SHA" == "$EXPECTED_SHA" ]] || {{
+      rm -rf "$TS_INSTALL_LOCK"
+      echo "ERROR: Tailscale archive checksum mismatch" >&2
+      exit 26
+    }}
+    TS_EXTRACT="$TS_INSTALL_LOCK/extract"
+    mkdir -p "$TS_EXTRACT"
+    tar -xzf "$TS_ARCHIVE" --strip-components=1 -C "$TS_EXTRACT"
+    chmod 750 "$TS_EXTRACT/tailscale" "$TS_EXTRACT/tailscaled"
+    rm -rf "$TAILSCALE_DIR"
+    mv "$TS_EXTRACT" "$TAILSCALE_DIR"
+    rm -rf "$TS_INSTALL_LOCK"
+    trap - EXIT
+  else
+    for _ in $(seq 1 120); do
+      [[ -x "$TAILSCALE" && -x "$TAILSCALED" ]] && break
+      [[ -d "$TS_INSTALL_LOCK" ]] || break
+      sleep 2
+    done
+    [[ -x "$TAILSCALE" && -x "$TAILSCALED" ]] || {{
+      echo "ERROR: shared Tailscale client installation failed" >&2
+      exit 27
+    }}
+  fi
 fi
 
 cat > "$DEPLOY_DIR/metadata.env" <<METADATA
@@ -1122,6 +1175,9 @@ MODEL_NAME={q(model_name)}
 MODEL_ROLE={q(model_role)}
 GPU_COUNT={params.gpu_count}
 CLOUDFLARED={q(cloudflared)}
+TAILSCALE={q(tailscale)}
+TAILSCALED={q(tailscaled)}
+TAILSCALE_HOSTNAME={q(tailscale_hostname)}
 EXPOSURE={q(params.exposure)}
 NAMED_URL={q(named_url)}
 export CONDA_PKGS_DIRS={q(f"{config.runtime_root}/conda-pkgs")}
@@ -1199,6 +1255,10 @@ fi
 
 PIDS=()
 cleanup() {{
+  if [[ -S "${{TS_SOCKET:-}}" ]]; then
+    "$TAILSCALE" --socket="$TS_SOCKET" serve reset >/dev/null 2>&1 || true
+    "$TAILSCALE" --socket="$TS_SOCKET" logout >/dev/null 2>&1 || true
+  fi
   for pid in "${{PIDS[@]}}"; do kill "$pid" 2>/dev/null || true; done
   current="$(cat "$DEPLOY_DIR/state" 2>/dev/null || true)"
   [[ "$current" == STOPPED ]] || echo FAILED > "$DEPLOY_DIR/state"
@@ -1256,6 +1316,41 @@ curl -fsS "http://127.0.0.1:$GATEWAY_PORT/health" | \
 
 case "$EXPOSURE" in
   none) ENDPOINT="http://$(hostname -f):$GATEWAY_PORT/v1" ;;
+  tailscale)
+    [[ -s "$DEPLOY_DIR/secrets/tailscale_authkey" ]] || {{
+      echo "ERROR: Tailscale auth key is missing" >&2
+      exit 31
+    }}
+    TS_DIR="$DEPLOY_DIR/runtime/tailscale"
+    TS_SOCKET="$TS_DIR/tailscaled.sock"
+    mkdir -p "$TS_DIR"
+    "$TAILSCALED" --tun=userspace-networking --state=mem: \
+      --socket="$TS_SOCKET" --statedir="$TS_DIR" --no-logs-no-support \
+      > "$DEPLOY_DIR/logs/tailscaled.log" 2>&1 &
+    PIDS+=("$!")
+    for _ in $(seq 1 60); do
+      [[ -S "$TS_SOCKET" ]] && break
+      kill -0 "${{PIDS[-1]}}" 2>/dev/null || break
+      sleep 1
+    done
+    [[ -S "$TS_SOCKET" ]] || {{
+      tail -n 120 "$DEPLOY_DIR/logs/tailscaled.log" >&2 || true
+      exit 31
+    }}
+    "$TAILSCALE" --socket="$TS_SOCKET" up \
+      --auth-key="file:$DEPLOY_DIR/secrets/tailscale_authkey" \
+      --hostname="$TAILSCALE_HOSTNAME" --accept-dns=false \
+      --accept-routes=false --timeout=90s
+    rm -f "$DEPLOY_DIR/secrets/tailscale_authkey"
+    "$TAILSCALE" --socket="$TS_SOCKET" serve --bg --yes --http=8080 \
+      "http://127.0.0.1:$GATEWAY_PORT"
+    TAILSCALE_IP="$("$TAILSCALE" --socket="$TS_SOCKET" ip -4 | head -n 1)"
+    [[ "$TAILSCALE_IP" == 100.* ]] || {{
+      echo "ERROR: Tailscale did not assign a private IPv4 address" >&2
+      exit 31
+    }}
+    ENDPOINT="http://$TAILSCALE_IP:8080/v1"
+    ;;
   cloudflare-quick)
     "$CLOUDFLARED" tunnel --url "http://127.0.0.1:$GATEWAY_PORT" --no-autoupdate \
       > "$DEPLOY_DIR/logs/cloudflared.log" 2>&1 &
@@ -1340,6 +1435,7 @@ for file in "$DEPLOY_DIR"/logs/bagel_*.log \
   "$DEPLOY_DIR"/logs/thinkmorph_*.log \
   "$DEPLOY_DIR"/logs/vllm.log \
   "$DEPLOY_DIR"/logs/gateway.log "$DEPLOY_DIR"/logs/cloudflared.log \
+  "$DEPLOY_DIR"/logs/tailscaled.log \
   "$DEPLOY_DIR"/logs/slurm_*.out "$DEPLOY_DIR"/logs/slurm_*.err \
   "$DEPLOY_DIR"/logs/slurm_bagel_*.out "$DEPLOY_DIR"/logs/slurm_bagel_*.err \
   "$DEPLOY_DIR"/logs/slurm_thinkmorph_*.out \
@@ -1361,7 +1457,8 @@ JOB_ID="$(< "$DEPLOY_DIR/job_id")"
 IFS=',' read -r -a JOB_IDS <<< "$JOB_ID"
 scancel "${{JOB_IDS[@]}}" 2>/dev/null || true
 rm -f "$DEPLOY_DIR/secrets/api_key" "$DEPLOY_DIR/secrets/worker_api_key" \
-  "$DEPLOY_DIR/secrets/cf_tunnel_token" "$DEPLOY_DIR/endpoint"
+  "$DEPLOY_DIR/secrets/cf_tunnel_token" \
+  "$DEPLOY_DIR/secrets/tailscale_authkey" "$DEPLOY_DIR/endpoint"
 echo STOPPED > "$DEPLOY_DIR/state"
 echo "Stopped job $JOB_ID and revoked its API key"
 echo "DELTA_LLM_RESULT|{deployment_id}|$JOB_ID|STOPPED|-|-|$DEPLOY_DIR"

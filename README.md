@@ -1,6 +1,6 @@
 # Delta BAGEL + ThinkMorph Text Inference
 
-在 NCSA Delta 上一次部署 `BAGEL-7B-MoT` 和 `ThinkMorph-7B`，通过同一个 HTTPS Base URL 和同一个 Bearer API Key 提供多图理解与纯文字输出。
+在 NCSA Delta 上部署 `BAGEL-7B-MoT` 和 `ThinkMorph-7B`，通过带 Bearer API Key 的 OpenAI 兼容接口提供多图理解与纯文字输出。vLLM 作业推荐使用 Tailscale 私网入口；Cloudflare 模式保留为可选兼容路径。
 
 固定实验契约：
 
@@ -86,19 +86,35 @@ H200-0承载两个BAGEL副本，H200-1承载两个ThinkMorph副本；每张卡�
 
 ```powershell
 .\run.ps1 --username your_ncsa_username deploy `
-  --engine vllm --model bagel-7b --gpu-type h200 --gpus 1 --hours 40 `
-  --exposure cloudflare-quick --acknowledge-external-tunnel --detach
+  --engine vllm --model bagel-7b --gpu-type h200 --gpus 1 --hours 48 `
+  --exposure tailscale --detach
 ```
 
 ThinkMorph和双A100示例：
 
 ```powershell
 .\run.ps1 --username your_ncsa_username deploy `
-  --engine vllm --model thinkmorph-7b --gpu-type a100 --gpus 2 --hours 40 `
-  --exposure cloudflare-quick --acknowledge-external-tunnel --detach
+  --engine vllm --model thinkmorph-7b --gpu-type a100 --gpus 2 --hours 48 `
+  --exposure tailscale --detach
 ```
 
 双A100使用vLLM pipeline parallel，把同一个模型分布到两张卡上。ThinkMorph是BAGEL微调权重；部署器会为其创建隔离的模型视图，组合官方BAGEL架构配置与ThinkMorph权重，不修改共享检查点。该路径固定安装并报告vLLM版本，启动官方OpenAI兼容服务，再通过只监听本机的认证网关暴露API。网关保留消息中`text`与`image_url`内容项的原始顺序，最多允许24张data URL图片；`/health`返回`engine=vllm`、实际版本和模型名，便于证明运行中的服务确实使用vLLM。vLLM路径只提供文字输出，不支持图片生成。
+
+### Tailscale 私网入口
+
+先在 Tailscale 管理后台创建一枚 **Reusable + Ephemeral + Pre-approved** 的 auth key。建议给 key 绑定专用 tag（例如 `tag:delta-inference`），并在 ACL 中只允许团队客户端访问该 tag 的 TCP 8080 端口。不要启用 Funnel；本部署只使用 tailnet 内可达的 Serve。
+
+PowerShell 中通过环境变量传入 key（不要写进仓库或命令行历史）：
+
+```powershell
+$env:TAILSCALE_AUTHKEY = Read-Host "Tailscale auth key"
+.\run.ps1 --username your_ncsa_username deploy `
+  --engine vllm --model bagel-7b --gpu-type h200 --gpus 1 --hours 48 `
+  --exposure tailscale --detach
+Remove-Item Env:TAILSCALE_AUTHKEY
+```
+
+部署器在计算节点上以无 root 的 userspace networking 启动独立 `tailscaled`，使用内存状态注册临时节点，并在注册后立刻删除远端 auth key。作业 READY 后，Base URL 形如 `http://100.x.y.z:8080/v1`；HTTP 流量位于 Tailscale 加密隧道内，且 Gateway 仍要求独立的 Bearer API key。调用端必须登录同一 tailnet，ACL 必须允许访问该节点。作业结束后临时节点会自动离开 tailnet。
 
 如果双卡同时可用导致预计排队较久，可以把同样的两张H200拆成两个独立的单卡作业：
 
@@ -126,7 +142,7 @@ ThinkMorph和双A100示例：
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="https://YOUR-TUNNEL.trycloudflare.com/v1",
+    base_url="http://100.x.y.z:8080/v1",
     api_key="YOUR-PRIVATE-KEY",
 )
 
@@ -205,7 +221,7 @@ GET  /v1/jobs/{job_id}/result
 部署READY后不能只检查 `/health`。必须按2→4→8→16→24图逐级运行：
 
 ```powershell
-$env:DELTA_LLM_BASE_URL = "https://YOUR-TUNNEL.trycloudflare.com/v1"
+$env:DELTA_LLM_BASE_URL = "http://100.x.y.z:8080/v1"
 $env:DELTA_LLM_API_KEY = "YOUR-PRIVATE-KEY"
 python .\examples\verify_multi_image.py `
   --image .\first.jpg --image .\second.jpg `
@@ -222,6 +238,7 @@ python .\examples\verify_multi_image.py `
 - 可用 `IMAGE_URL_HOST_ALLOWLIST` 限制到批准的对象存储域名。
 - 支持JPEG、PNG、WebP。
 - Quick Tunnel无SLA，不应承载未经PI/NCSA批准的敏感数据。
+- Tailscale 模式不开放公网入口；调用端必须属于同一 tailnet 并通过 ACL。
 - `/v1/images/generations` 固定返回410，不会生成图片。
 
 完整字段见 [API文档](docs/API.md)，多成员排队规则见 [团队说明](docs/TEAM_QUEUE.md)，安全说明见 [SECURITY](docs/SECURITY.md)。

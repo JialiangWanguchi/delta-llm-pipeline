@@ -32,6 +32,7 @@ def make_params(
         exposure=exposure,
         hf_token="hf-secret-must-not-appear",
         cf_tunnel_token="named-secret" if exposure == "cloudflare-named" else "",
+        tailscale_auth_key="tskey-secret-must-not-appear" if exposure == "tailscale" else "",
         detach=False,
         recover_stalled_setup=False,
         replace_existing_services=False,
@@ -208,6 +209,31 @@ def test_vllm_bagel_h200_script_is_authenticated_pinned_and_valid() -> None:
     assert "vllm_proxy:app" in script
     assert "runtime/worker.py" not in script
     assert script.count("sbatch --parsable") == 1
+    bash = shutil.which("bash")
+    if bash:
+        result = subprocess.run(
+            [bash, "-n"], input=script.encode(), capture_output=True, check=False
+        )
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+
+def test_vllm_tailscale_is_private_ephemeral_and_does_not_leak_auth_key() -> None:
+    params = replace(
+        make_params(exposure="tailscale", gpu_type="h200", gpu_count=1),
+        models=("bagel-7b",),
+        engine="vllm",
+    )
+    script = render_vllm_deploy_script(Config(), params)
+    assert "tskey-secret-must-not-appear" not in script
+    assert "--tun=userspace-networking" in script
+    assert "--state=mem:" in script
+    assert '--auth-key="file:$DEPLOY_DIR/secrets/tailscale_authkey"' in script
+    assert 'rm -f "$DEPLOY_DIR/secrets/tailscale_authkey"' in script
+    assert "serve --bg --yes --http=8080" in script
+    assert 'ENDPOINT="http://$TAILSCALE_IP:8080/v1"' in script
+    assert "tailscale funnel" not in script
+    assert "tailscale_1.102.4_amd64.tgz" in script
+    assert "sha256sum" in script
     bash = shutil.which("bash")
     if bash:
         result = subprocess.run(
