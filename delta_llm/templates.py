@@ -1139,6 +1139,7 @@ GPU_COUNT={params.gpu_count}
 GPU_LAYOUT=single:$MODEL_ROLE-vllm-{params.gpu_count}x{params.gpu_type}
 INFERENCE_ENGINE=vllm
 VLLM_VERSION={config.vllm_version}
+VLLM_PACKAGE_VERSION={config.vllm_package_version}
 MAX_IMAGES=24
 EXPOSURE=$EXPOSURE
 METADATA
@@ -1183,37 +1184,81 @@ NAMED_URL={q(named_url)}
 export CONDA_PKGS_DIRS={q(f"{config.runtime_root}/conda-pkgs")}
 export PIP_CACHE_DIR={q(f"{config.runtime_root}/pip-cache")}
 export PYTHONUNBUFFERED=1
+VLLM_VERSION={q(config.vllm_version)}
+VLLM_PACKAGE_VERSION={q(config.vllm_package_version)}
+VLLM_WHEEL_URL={q(config.vllm_wheel_url)}
+VLLM_WHEEL_SHA256={q(config.vllm_wheel_sha256)}
+VLLM_TORCH_INDEX_URL={q(config.vllm_torch_index_url)}
+VLLM_WHEEL="$PIP_CACHE_DIR/wheels/vllm-$VLLM_PACKAGE_VERSION.whl"
+
+echo STARTING > "$DEPLOY_DIR/state"
+rm -f "$DEPLOY_DIR/endpoint"
+PIDS=()
+INSTALL_OWNER=false
+cleanup() {{
+  if [[ "${{INSTALL_OWNER:-false}}" == true ]]; then
+    rm -rf "$INSTALL_LOCK"
+    rm -f "$ENV_DIR/.delta-vllm-ready" "$ENV_DIR/.delta-vllm-package"
+  fi
+  if [[ -S "${{TS_SOCKET:-}}" ]]; then
+    "$TAILSCALE" --socket="$TS_SOCKET" serve reset >/dev/null 2>&1 || true
+    "$TAILSCALE" --socket="$TS_SOCKET" logout >/dev/null 2>&1 || true
+  fi
+  for pid in "${{PIDS[@]}}"; do kill "$pid" 2>/dev/null || true; done
+  current="$(cat "$DEPLOY_DIR/state" 2>/dev/null || true)"
+  [[ "$current" == STOPPED ]] || echo FAILED > "$DEPLOY_DIR/state"
+}}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 env_ready() {{
   [[ -x "$ENV_DIR/bin/vllm" ]] || return 1
   [[ -f "$ENV_DIR/.delta-vllm-ready" ]] || return 1
-  [[ "$(< "$ENV_DIR/.delta-vllm-ready")" == "{config.vllm_version}" ]]
+  [[ "$(< "$ENV_DIR/.delta-vllm-ready")" == "$VLLM_VERSION" ]] || return 1
+  [[ -f "$ENV_DIR/.delta-vllm-package" ]] || return 1
+  [[ "$(< "$ENV_DIR/.delta-vllm-package")" == "$VLLM_PACKAGE_VERSION" ]]
 }}
 
 if ! env_ready; then
   if mkdir "$INSTALL_LOCK" 2>/dev/null; then
-    cleanup_install() {{
-      status=$?
-      rm -rf "$INSTALL_LOCK"
-      if [[ $status -ne 0 ]]; then rm -f "$ENV_DIR/.delta-vllm-ready"; fi
-      return $status
-    }}
-    trap cleanup_install EXIT
+    INSTALL_OWNER=true
     rm -rf "$ENV_DIR"
     conda create -y --solver libmamba -p "$ENV_DIR" python={config.python_version} pip
     "$ENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
+    mkdir -p "$(dirname "$VLLM_WHEEL")"
+    ACTUAL_VLLM_WHEEL_SHA256=""
+    if [[ -f "$VLLM_WHEEL" ]]; then
+      ACTUAL_VLLM_WHEEL_SHA256="$(sha256sum "$VLLM_WHEEL" | awk '{{print $1}}')"
+    fi
+    if [[ "$ACTUAL_VLLM_WHEEL_SHA256" != "$VLLM_WHEEL_SHA256" ]]; then
+      rm -f "$VLLM_WHEEL" "$VLLM_WHEEL.tmp.$$"
+      curl -fL --retry 5 --retry-delay 2 "$VLLM_WHEEL_URL" \
+        -o "$VLLM_WHEEL.tmp.$$"
+      ACTUAL_VLLM_WHEEL_SHA256="$(sha256sum "$VLLM_WHEEL.tmp.$$" | awk '{{print $1}}')"
+      [[ "$ACTUAL_VLLM_WHEEL_SHA256" == "$VLLM_WHEEL_SHA256" ]] || {{
+        rm -f "$VLLM_WHEEL.tmp.$$"
+        echo "ERROR: vLLM wheel checksum mismatch" >&2
+        exit 26
+      }}
+      mv -f "$VLLM_WHEEL.tmp.$$" "$VLLM_WHEEL"
+    fi
     "$ENV_DIR/bin/python" -m pip install \
-      "vllm=={config.vllm_version}" "httpx==0.28.1"
+      "$VLLM_WHEEL" "httpx==0.28.1" \
+      --extra-index-url "$VLLM_TORCH_INDEX_URL"
+    "$ENV_DIR/bin/python" -m pip check
     "$ENV_DIR/bin/python" - <<'PY'
 import importlib.metadata
-assert importlib.metadata.version("vllm") == "{config.vllm_version}"
+assert importlib.metadata.version("vllm") == "{config.vllm_package_version}"
 import torch
 assert torch.cuda.is_available()
+assert torch.version.cuda == "12.9", torch.version.cuda
 print("vLLM", importlib.metadata.version("vllm"), "torch", torch.__version__)
 PY
-    printf '%s\n' "{config.vllm_version}" > "$ENV_DIR/.delta-vllm-ready"
-    trap - EXIT
+    printf '%s\n' "$VLLM_PACKAGE_VERSION" > "$ENV_DIR/.delta-vllm-package"
+    printf '%s\n' "$VLLM_VERSION" > "$ENV_DIR/.delta-vllm-ready"
     rm -rf "$INSTALL_LOCK"
+    INSTALL_OWNER=false
   else
     for _ in $(seq 1 360); do
       env_ready && break
@@ -1252,18 +1297,6 @@ if [[ "$MODEL_ROLE" == thinkmorph ]]; then
   cp "$BAGEL_MODEL/config.json" "$SERVER_MODEL/config.json"
   cp "$BAGEL_MODEL/preprocessor_config.json" "$SERVER_MODEL/preprocessor_config.json"
 fi
-
-PIDS=()
-cleanup() {{
-  if [[ -S "${{TS_SOCKET:-}}" ]]; then
-    "$TAILSCALE" --socket="$TS_SOCKET" serve reset >/dev/null 2>&1 || true
-    "$TAILSCALE" --socket="$TS_SOCKET" logout >/dev/null 2>&1 || true
-  fi
-  for pid in "${{PIDS[@]}}"; do kill "$pid" 2>/dev/null || true; done
-  current="$(cat "$DEPLOY_DIR/state" 2>/dev/null || true)"
-  [[ "$current" == STOPPED ]] || echo FAILED > "$DEPLOY_DIR/state"
-}}
-trap cleanup EXIT INT TERM
 
 PORT_BASE=$((20000 + SLURM_JOB_ID % 30000))
 VLLM_PORT=$PORT_BASE

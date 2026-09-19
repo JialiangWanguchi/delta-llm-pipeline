@@ -200,7 +200,15 @@ def test_vllm_bagel_h200_script_is_authenticated_pinned_and_valid() -> None:
     assert "#SBATCH --mem=240g" in script
     assert "INFERENCE_ENGINE=vllm" in script
     assert "VLLM_VERSION=0.20.2" in script
-    assert '"vllm==0.20.2"' in script
+    assert "VLLM_PACKAGE_VERSION=0.20.2+cu129" in script
+    assert "manylinux_2_31_x86_64.whl" in script
+    assert "2f8c2bf2ac6d3d16f930535e66822abd71065468521884eb5b910225b2abef4b" in script
+    assert '"$VLLM_WHEEL" "httpx==0.28.1"' in script
+    assert '--extra-index-url "$VLLM_TORCH_INDEX_URL"' in script
+    assert '"$ENV_DIR/bin/python" -m pip check' in script
+    assert '.delta-vllm-package' in script
+    assert 'echo STARTING > "$DEPLOY_DIR/state"' in script
+    assert 'echo FAILED > "$DEPLOY_DIR/state"' in script
     assert '"$ENV_DIR/bin/vllm" serve "$SERVER_MODEL"' in script
     assert "MODEL_NAME=bagel-7b" in script
     assert '--served-model-name "$MODEL_NAME"' in script

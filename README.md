@@ -100,6 +100,8 @@ ThinkMorph和双A100示例：
 
 双A100使用vLLM pipeline parallel，把同一个模型分布到两张卡上。ThinkMorph是BAGEL微调权重；部署器会为其创建隔离的模型视图，组合官方BAGEL架构配置与ThinkMorph权重，不修改共享检查点。该路径固定安装并报告vLLM版本，启动官方OpenAI兼容服务，再通过只监听本机的认证网关暴露API。网关保留消息中`text`与`image_url`内容项的原始顺序，最多允许24张data URL图片；`/health`返回`engine=vllm`、实际版本和模型名，便于证明运行中的服务确实使用vLLM。vLLM路径只提供文字输出，不支持图片生成。
 
+Delta 当前 RH9 节点的 glibc 版本低于 PyPI 默认 vLLM 0.20.2 wheel 要求。部署器因此固定使用 vLLM 官方 GitHub Release 的 CUDA 12.9 / `manylinux_2_31` wheel，并在安装前校验官方 SHA-256；共享环境同时记录发行版本 `0.20.2` 与实际构建版本 `0.20.2+cu129`，防止 pip 静默退回源码包或复用不完整环境。
+
 ### Tailscale 私网入口
 
 先在 Tailscale 管理后台创建一枚 **Reusable + Ephemeral + Pre-approved** 的 auth key。建议给 key 绑定专用 tag（例如 `tag:delta-inference`），并在 ACL 中只允许团队客户端访问该 tag 的 TCP 8080 端口。不要启用 Funnel；本部署只使用 tailnet 内可达的 Serve。

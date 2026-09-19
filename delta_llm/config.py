@@ -24,6 +24,15 @@ class Config:
     flash_attn_version: str = "2.5.8"
     cuda_wheel: str = "cu124"
     vllm_version: str = "0.20.2"
+    vllm_package_version: str = "0.20.2+cu129"
+    vllm_wheel_url: str = (
+        "https://github.com/vllm-project/vllm/releases/download/v0.20.2/"
+        "vllm-0.20.2%2Bcu129-cp38-abi3-manylinux_2_31_x86_64.whl"
+    )
+    vllm_wheel_sha256: str = (
+        "2f8c2bf2ac6d3d16f930535e66822abd71065468521884eb5b910225b2abef4b"
+    )
+    vllm_torch_index_url: str = "https://download.pytorch.org/whl/cu129"
     bagel_commit: str = "a2fa77dd8caeefc41e6607ae0ec17408d3f4ee9f"
     thinkmorph_commit: str = "c1a48adfa212259c8ad79dfd9d05d87c27340cef"
     shared_root: str = "/projects/bhsz/delta-llm/shared"
@@ -67,6 +76,16 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         flash_attn_version=str(runtime.get("flash_attn_version", Config.flash_attn_version)),
         cuda_wheel=str(runtime.get("cuda_wheel", Config.cuda_wheel)),
         vllm_version=str(runtime.get("vllm_version", Config.vllm_version)),
+        vllm_package_version=str(
+            runtime.get("vllm_package_version", Config.vllm_package_version)
+        ),
+        vllm_wheel_url=str(runtime.get("vllm_wheel_url", Config.vllm_wheel_url)),
+        vllm_wheel_sha256=str(
+            runtime.get("vllm_wheel_sha256", Config.vllm_wheel_sha256)
+        ),
+        vllm_torch_index_url=str(
+            runtime.get("vllm_torch_index_url", Config.vllm_torch_index_url)
+        ),
         bagel_commit=str(runtime.get("bagel_commit", Config.bagel_commit)),
         thinkmorph_commit=str(runtime.get("thinkmorph_commit", Config.thinkmorph_commit)),
         shared_root=str(runtime.get("shared_root", Config.shared_root)).rstrip("/"),
